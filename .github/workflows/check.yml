@@ -1,0 +1,24 @@
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: docker build -t plow-openclaw:test .
+      - name: Type-check and test
+        run: |
+          docker run --rm --user root --network none \
+            -v "$PWD/node_modules:/opt/plow/node_modules:ro" \
+            -v "$PWD/tests:/opt/plow/tests:ro" plow-openclaw:test sh -c \
+            '/opt/plow/node_modules/.bin/tsc --noEmit -p /opt/plow/tsconfig.json && mkdir -p /opt/plow/plugin/node_modules && ln -s /app /opt/plow/plugin/node_modules/openclaw && node --test /opt/plow/tests/*.test.ts'
+      - name: Offline gateway probe
+        run: docker run --rm --network none plow-openclaw:test /opt/plow/probe

@@ -1,0 +1,22 @@
+{
+  "id": "plow",
+  "name": "Plow",
+  "channels": ["plow"],
+  "contracts": { "tools": ["plow_start_thread"] },
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false },
+  "channelConfigs": {
+    "plow": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiBase", "lineUid"],
+        "properties": {
+          "apiBase": { "type": "string" },
+          "lineUid": { "type": "string" },
+          "emailLineUid": { "type": "string" }
+        }
+      }
+    }
+  }
+}

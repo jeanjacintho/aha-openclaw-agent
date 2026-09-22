@@ -1,0 +1,9 @@
+services:
+  agent:
+    build: .
+    env_file: ./plow-credentials
+    volumes:
+      - state:/var/lib/plow
+    stop_grace_period: 35s
+volumes:
+  state:

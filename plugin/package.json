@@ -1,0 +1,21 @@
+{
+  "name": "@plow/openclaw-channel",
+  "version": "0.1.0",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": "2026.9.4"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  }
+}
