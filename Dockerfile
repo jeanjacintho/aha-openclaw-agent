@@ -29,11 +29,22 @@ RUN curl -fsS --max-time 60 -o /opt/plow/agent-index-client.py \
 # it installed the usage half stops reading zero; without it the client still
 # registers and reports empty days. Pinned and checksummed for the same reason
 # as the client above: it runs inside an agent holding a live credential.
+#
+# One build per architecture: a local build on Apple silicon is arm64, and an
+# amd64 binary there fails under Rosetta, so the reporter sent nothing. Both
+# checksums match the release's provenance files.
 ARG AGENTSVIEW_VERSION=0.44.0
-ARG AGENTSVIEW_SHA256=037ea7a46d52e06b20363b4aa7cd7f28e32f31d8215803d6e9a0c96bac5818e3
-RUN curl -fsS --max-time 120 -L -o /tmp/agentsview.tgz \
-      "https://github.com/kenn-io/agentsview/releases/download/v${AGENTSVIEW_VERSION}/agentsview_${AGENTSVIEW_VERSION}_linux_amd64.tar.gz" \
- && echo "${AGENTSVIEW_SHA256}  /tmp/agentsview.tgz" | sha256sum -c - \
+ARG AGENTSVIEW_SHA256_AMD64=037ea7a46d52e06b20363b4aa7cd7f28e32f31d8215803d6e9a0c96bac5818e3
+ARG AGENTSVIEW_SHA256_ARM64=6f3c76ebe119826a2def1ae226c3573b214d396a3ed7c477ef282b1063345b87
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) sum="${AGENTSVIEW_SHA256_AMD64}" ;; \
+      arm64) sum="${AGENTSVIEW_SHA256_ARM64}" ;; \
+      *) echo "agentsview: no pinned build for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && curl -fsS --max-time 120 -L -o /tmp/agentsview.tgz \
+      "https://github.com/kenn-io/agentsview/releases/download/v${AGENTSVIEW_VERSION}/agentsview_${AGENTSVIEW_VERSION}_linux_${TARGETARCH:-amd64}.tar.gz" \
+ && echo "${sum}  /tmp/agentsview.tgz" | sha256sum -c - \
  && tar -xzf /tmp/agentsview.tgz -C /usr/local/bin agentsview \
  && rm /tmp/agentsview.tgz \
  && chmod 0755 /usr/local/bin/agentsview
