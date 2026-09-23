@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 
-for (const name of ["boot/agent-index", "boot/config", "boot/identity", "boot/prompt", "boot/main", "boot/process", "boot/probe", "boot/probe-fixture", "boot/mcp-bridge", "plugin/index", "plugin/transport", "aha/worker", "aha/usage/ledger", "aha/usage/openclaw-export", "aha/usage/ledger-export", "aha/store/db", "aha/config", "aha/secrets"]) {
+for (const name of ["boot/agent-index", "boot/config", "boot/identity", "boot/prompt", "boot/main", "boot/process", "boot/probe", "boot/probe-fixture", "boot/mcp-bridge", "plugin/index", "plugin/transport", "aha/worker", "aha/usage/ledger", "aha/usage/openclaw-export", "aha/usage/ledger-export", "aha/store/db", "aha/config", "aha/secrets", "aha/sources/types", "aha/sources/hn", "aha/sources/agent-index", "aha/pipeline/ingest"]) {
   const source = await readFile(`/opt/plow/${name}.ts`, "utf8");
   const output = name.startsWith("plugin/") ? name.replace("plugin/", "plugin/dist/") : name;
   await mkdir(`/opt/plow/${output.substring(0, output.lastIndexOf("/"))}`, { recursive: true });
