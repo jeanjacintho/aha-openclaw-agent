@@ -1,3 +1,4 @@
+import { type Role } from "./pipeline/route.ts";
 import { type Store } from "./store/db.ts";
 
 export type AhaConfig = {
@@ -12,6 +13,7 @@ export type AhaConfig = {
   tz?: string;
   ownerChatUid?: string;
   agentIndexSlug?: string;
+  roleChats?: Partial<Record<Role, string>>;
 };
 
 function assertConfig(config: AhaConfig) {
