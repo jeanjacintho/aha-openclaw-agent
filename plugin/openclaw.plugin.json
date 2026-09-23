@@ -2,7 +2,7 @@
   "id": "plow",
   "name": "Plow",
   "channels": ["plow"],
-  "contracts": { "tools": ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_not_us", "aha_logs", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"] },
+  "contracts": { "tools": ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_complaint", "aha_not_us", "aha_logs", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"] },
   "activation": { "onStartup": true },
   "configSchema": { "type": "object", "additionalProperties": false },
   "channelConfigs": {

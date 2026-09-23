@@ -18,7 +18,7 @@ for (const mode of ["full", "discovery", "tool-discovery"]) test(`${mode} expose
     registerTool(factory: (context: object) => { name: string }) { names.push(factory({}).name); },
     on(name: string) { hooks.push(name); },
   });
-  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_not_us", "aha_logs", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"]);
+  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_complaint", "aha_not_us", "aha_logs", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"]);
   const manifest = JSON.parse(await readFile(new URL("../plugin/openclaw.plugin.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.contracts.tools, names);
   assert.ok(!hooks.includes("before_tool_call"));
@@ -241,6 +241,26 @@ test("response policy rule 5 fails at 3 replies in the same subreddit day", asyn
   for (let i = 0; i < 3; i++) {
     store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', NULL)").run(`post:2026-09-23:reddit:testaha:t1_${i}`);
   }
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("response policy counts verified and uncertain Reddit posts toward the subreddit day limit", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/xyz/title/new/" });
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', NULL)").run("post:2026-09-23:reddit:testaha:t1_a");
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', NULL)").run("post:2026-09-23:reddit:testaha:t1_b");
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'uncertain', NULL)").run("post:2026-09-23:reddit:testaha:t1_c");
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("response policy treats two Reddit comments in the same thread as one thread", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_def", url: "https://www.reddit.com/r/testaha/comments/xyz/title/def/" });
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', NULL)").run("thread:reddit:t3_xyz");
   const result = checkPolicy(store, draft, now);
   assert.equal(result.allow, false);
   if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);

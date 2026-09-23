@@ -9,7 +9,7 @@ import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
 import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
-import { postReply } from "../aha/responder/post.ts";
+import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
@@ -654,6 +654,40 @@ export function registerAhaTools(api: {
   }));
 
   api.registerTool(ctx => ({
+    name: "aha_complaint",
+    label: "Record a complaint about an AHA reply",
+    description: "Owner or a member of the item's role. Drops autonomy for that source×category to L1 immediately after a complaint about an automatic or posted reply.",
+    parameters: {
+      type: "object",
+      required: ["itemId", "reason"],
+      additionalProperties: false,
+      properties: {
+        itemId: { type: ["integer", "string"] },
+        reason: { type: "string", minLength: 1 },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const itemId = publicId(args.itemId);
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!itemId) return fail("itemId is required");
+      if (!reason) return fail("reason is required");
+      const store = openStore();
+      try {
+        const blocked = canActOnItem(store, ctx, itemId);
+        if (blocked) return blocked;
+        const draft = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? ORDER BY id DESC LIMIT 1").get(itemId) as Draft | undefined;
+        if (!draft) return fail("draft not found");
+        recordDecision(store, draft, "complaint");
+        return ok({ itemId, publicId: `AHA-${itemId}`, demoted: true, level: "L1" });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
     name: "aha_not_us",
     label: "Mark an AHA item as not us",
     description: "Record a negative classification example for this item. Owner or a member of the item's role.",
@@ -705,8 +739,8 @@ export function registerAhaTools(api: {
         const classification = store.db.prepare("SELECT category, urgency, about, confidence, language, is_question FROM classifications WHERE item_id = ?").get(itemId) ?? null;
         const drafts = store.db.prepare("SELECT id, state, length(body) AS chars FROM drafts WHERE item_id = ? ORDER BY id").all(itemId);
         const feedback = store.db.prepare("SELECT id, kind FROM feedback_examples WHERE item_id = ? ORDER BY id").all(itemId);
-        const ident = store.db.prepare("SELECT source, external_id FROM items WHERE id = ?").get(itemId) as { source: string; external_id: string };
-        const ledger = store.db.prepare("SELECT key, state, url FROM ledger WHERE key LIKE ? OR key = ?").all(`post:%:${ident.source}:${ident.external_id}`, `thread:${ident.source}:${ident.external_id}`);
+        const ident = store.db.prepare("SELECT source, external_id, url FROM items WHERE id = ?").get(itemId) as { source: string; external_id: string; url: string | null };
+        const ledger = store.db.prepare("SELECT key, state, url FROM ledger WHERE key LIKE ? OR key = ?").all(`post:%:${ident.source}:${ident.external_id}`, threadLedgerKey(ident.source, ident.external_id, ident.url));
         return ok({ publicId: `AHA-${itemId}`, item, classification, drafts, feedback, ledger });
       } finally {
         store.close();

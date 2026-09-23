@@ -1,11 +1,13 @@
 import { type Store } from "../store/db.ts";
 
 export type AutonomyLevel = "L0" | "L1" | "L2";
-export type Decision = "approved" | "edited" | "ignored";
+export type Decision = "approved" | "edited" | "ignored" | "complaint";
 
 type DraftRef = { id: number; itemId: number; body: string; state: string };
 
 export const L2_STREAK = 5;
+export const L2_WHITELIST = new Set(["question", "praise"]);
+export const POSTING_SOURCES = new Set(["reddit"]);
 
 type AutonomyRow = { source: string; category: string; level: string; streak: number; suggested: number };
 
@@ -23,7 +25,7 @@ function save(store: Store, row: AutonomyRow) {
 
 export function autonomyLevel(store: Store, source: string, category: string): AutonomyLevel {
   const level = load(store, source, category).level;
-  if (level === "L2") return "L2";
+  if (level === "L2" && L2_WHITELIST.has(category) && POSTING_SOURCES.has(source)) return "L2";
   if (level === "L0") return "L0";
   return "L1";
 }
@@ -40,6 +42,10 @@ function draftContext(store: Store, draft: DraftRef) {
     WHERE items.id = ?`).get(draft.itemId) as { source: string; category: string | null; about: string | null } | undefined;
 }
 
+function demote(store: Store, source: string, category: string) {
+  save(store, { source, category, level: "L1", streak: 0, suggested: 0 });
+}
+
 export function recordDecision(store: Store, draft: DraftRef, decision: Decision): { suggest?: { source: string; category: string } } {
   const ctx = draftContext(store, draft);
   if (!ctx) return {};
@@ -48,6 +54,18 @@ export function recordDecision(store: Store, draft: DraftRef, decision: Decision
   const row = load(store, ctx.source, category);
   if (decision === "approved") {
     if (row.level === "L2") {
+      save(store, row);
+      return {};
+    }
+    const edited = (store.db.prepare("SELECT edited FROM drafts WHERE id = ?").get(draft.id) as { edited: number } | undefined)?.edited === 1;
+    if (edited) {
+      store.db.prepare("UPDATE drafts SET edited = 0 WHERE id = ?").run(draft.id);
+      row.level = "L1";
+      save(store, row);
+      return {};
+    }
+    if (!POSTING_SOURCES.has(ctx.source)) {
+      row.level = "L1";
       save(store, row);
       return {};
     }
@@ -61,14 +79,16 @@ export function recordDecision(store: Store, draft: DraftRef, decision: Decision
     save(store, row);
     return {};
   }
-  row.level = "L1";
-  row.streak = 0;
-  row.suggested = 0;
-  save(store, row);
+  demote(store, ctx.source, category);
+  if (decision === "edited") {
+    store.db.prepare("UPDATE drafts SET edited = 1 WHERE id = ?").run(draft.id);
+  }
   return {};
 }
 
 export function confirmAutonomy(store: Store, source: string, category: string): { ok: true; level: "L2" } | { ok: false; reason: string } {
+  if (!POSTING_SOURCES.has(source)) return { ok: false, reason: "source does not post" };
+  if (!L2_WHITELIST.has(category)) return { ok: false, reason: "not in whitelist" };
   const row = load(store, source, category);
   if (row.suggested !== 1 && row.streak < L2_STREAK) return { ok: false, reason: "not suggested" };
   row.level = "L2";

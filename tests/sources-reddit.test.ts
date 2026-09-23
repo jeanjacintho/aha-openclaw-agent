@@ -28,6 +28,7 @@ test("Reddit search uses the user token and app User-Agent", async () => {
   assert.equal(result.items[0].externalId, "t1_abc");
   assert.equal(result.items[0].source, "reddit");
   assert.match(result.items[0].url, /testaha/);
+  assert.equal(result.items[0].parentUrl, "https://www.reddit.com/t3_xyz");
   assert.equal(result.items.some(item => item.externalId === "t1_old"), false);
   assert.match(headers[0], /^Bearer reddit_user_token\|/);
   assert.match(headers[0], new RegExp(REDDIT_USER_AGENT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

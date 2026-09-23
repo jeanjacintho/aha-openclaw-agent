@@ -43,7 +43,8 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.deepEqual(tables(first), TABLES);
   assert.deepEqual(columns(first, "source_runs"), ["id", "source", "window_start", "window_end", "status", "detail"]);
   assert.deepEqual(columns(first, "deliveries"), ["key", "chat_uid", "status", "message_uid", "created_at", "updated_at"]);
-  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 5);
+  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 6);
+  assert.equal(columns(first, "drafts").includes("edited"), true);
   assert.equal(columns(first, "items").includes("assignee"), true);
   assert.equal(columns(first, "items").includes("draft_attempts"), true);
   first.db.prepare("INSERT INTO items (source, external_id) VALUES (?, ?)").run("hn", "1");
@@ -123,7 +124,7 @@ test("two processes can open a new database at the same time", async t => {
     for (const result of results) assert.equal(result.status, 0, result.stderr);
     const store = openStore(dir);
     t.after(() => store.close());
-    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 5);
+    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 6);
     assert.deepEqual(tables(store), TABLES);
   }
 });

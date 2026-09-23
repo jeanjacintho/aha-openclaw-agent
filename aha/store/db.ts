@@ -8,7 +8,7 @@ export type Store = {
   close(): void;
 };
 
-const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql"];
+const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql", "006_draft_edited.sql"];
 const BUSY_MS = 5000;
 
 function defaultMigrations() {

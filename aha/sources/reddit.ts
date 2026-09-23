@@ -49,7 +49,7 @@ function toItem(child: Child): RawItem | undefined {
   const name = data?.name || (data?.id ? `t1_${data.id}` : "");
   if (!name) return;
   const permalink = data?.permalink;
-  const parent = data?.parent_id && data.parent_id !== name ? `https://www.reddit.com/${data.parent_id}` : undefined;
+  const thread = data?.link_id || (data?.parent_id && data.parent_id !== name ? data.parent_id : undefined);
   return {
     source: "reddit",
     externalId: name,
@@ -58,7 +58,7 @@ function toItem(child: Child): RawItem | undefined {
     title: data?.title,
     body: data?.body || data?.title || "",
     publishedAt: data?.created_utc ? new Date(data.created_utc * 1000).toISOString() : "",
-    parentUrl: parent,
+    parentUrl: thread ? redditUrl(undefined, thread) : undefined,
   };
 }
 

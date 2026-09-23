@@ -1,6 +1,11 @@
+import { getConfig } from "../config.ts";
+import { sendToChat } from "../notify/plow.ts";
 import { readSecrets } from "../secrets.ts";
 import { type Store } from "../store/db.ts";
 import { REDDIT_USER_AGENT } from "../sources/reddit.ts";
+import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
+
+export { redditSubreddit, redditThreadId, threadLedgerKey, postLedgerKey } from "./reddit-url.ts";
 
 type Draft = { id: number; itemId: number; body: string; state: string };
 
@@ -14,11 +19,6 @@ export type PostDeps = {
 
 const COMMENT = "https://oauth.reddit.com/api/comment";
 const INFO = "https://oauth.reddit.com/api/info";
-
-export function redditSubreddit(url: string | null | undefined) {
-  const match = (url ?? "").match(/reddit\.com\/r\/([^/?#]+)/i);
-  if (match) return match[1].toLowerCase();
-}
 
 function ymd(now: Date) {
   return now.toISOString().slice(0, 10);
@@ -36,23 +36,51 @@ function oauthHeaders(token: string) {
   };
 }
 
-function postKey(day: string, source: string, externalId: string, url: string | null) {
-  const sub = source === "reddit" ? redditSubreddit(url) : undefined;
-  if (sub) return `post:${day}:reddit:${sub}:${externalId}`;
-  return `post:${day}:${source}:${externalId}`;
-}
-
-function threadKey(source: string, externalId: string) {
-  return `thread:${source}:${externalId}`;
-}
-
 function ledgerState(store: Store, key: string) {
   return (store.db.prepare("SELECT state, url FROM ledger WHERE key = ?").get(key) as { state: string; url: string | null } | undefined);
 }
 
-function writeLedger(store: Store, key: string, state: string, url: string | null) {
-  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET state = excluded.state, url = excluded.url")
-    .run(key, state, url);
+function setLedger(store: Store, key: string, state: string, url: string | null) {
+  store.db.prepare("UPDATE ledger SET state = ?, url = ? WHERE key = ?").run(state, url, key);
+}
+
+function takeKey(store: Store, key: string, url: string | null) {
+  const inserted = store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posting', ?) ON CONFLICT (key) DO NOTHING").run(key, url);
+  if (inserted.changes === 1) return true;
+  const stolen = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state IN ('ready', 'failed')").run(url, key);
+  return stolen.changes === 1;
+}
+
+function freezePosting(store: Store, key: string, url: string | null) {
+  store.db.prepare("UPDATE ledger SET state = 'uncertain', url = ? WHERE key = ? AND state = 'posting'").run(url, key);
+}
+
+function haltFrom(state: string | undefined): PostResult | undefined {
+  if (!state) return;
+  if (state === "uncertain" || state === "posting") return "uncertain";
+  if (state === "posted" || state === "verified") return "posted";
+}
+
+function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostResult | "owned" {
+  return store.tx(() => {
+    const post = ledgerState(store, postKey);
+    const thread = ledgerState(store, threadKey);
+    if (post?.state === "posting" || thread?.state === "posting") {
+      freezePosting(store, postKey, url);
+      freezePosting(store, threadKey, url);
+      return "uncertain";
+    }
+    const halt = haltFrom(post?.state) ?? haltFrom(thread?.state);
+    if (halt) return halt;
+    const threadReadyForeign = thread?.state === "ready" && post?.state !== "ready" && post?.state !== "failed";
+    if (threadReadyForeign) return "posted";
+    if (!takeKey(store, postKey, url) || !takeKey(store, threadKey, url)) {
+      freezePosting(store, postKey, url);
+      freezePosting(store, threadKey, url);
+      return haltFrom(ledgerState(store, postKey)?.state) ?? haltFrom(ledgerState(store, threadKey)?.state) ?? "uncertain";
+    }
+    return "owned";
+  });
 }
 
 function commentId(payload: unknown): { id: string; permalink?: string } | undefined {
@@ -71,6 +99,25 @@ async function verify(http: typeof fetch, token: string, fullname: string) {
   return (payload.data?.children ?? []).some(child => child.data?.name === fullname);
 }
 
+async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps) {
+  const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
+  if (!owner) return;
+  const lang = getConfig(store)?.language || "en";
+  const text = lang.startsWith("pt")
+    ? `Post incerto AHA-${itemId}. Não vou repostar. Confira o thread.`
+    : `Uncertain Reddit post for AHA-${itemId}. I will not retry. Check the thread.`;
+  try {
+    await sendToChat(owner, text, `uncertain:${key}`, { store, fetch: deps.fetch, now: deps.now });
+  } catch {
+    /* unit tests may omit Plow env */
+  }
+}
+
+function finish(store: Store, postKey: string, threadKey: string, state: string, url: string | null) {
+  setLedger(store, postKey, state, url);
+  setLedger(store, threadKey, state, url);
+}
+
 export async function postReply(store: Store, draftId: number, deps: PostDeps = {}): Promise<PostResult> {
   const draft = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE id = ?").get(draftId) as Draft | undefined;
   if (!draft) return "failed";
@@ -82,17 +129,18 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   if (paused(store)) return "failed";
   const now = deps.now?.() ?? new Date();
   const day = ymd(now);
-  const key = postKey(day, item.source, item.externalId, item.url);
-  const thread = threadKey(item.source, item.externalId);
-  for (const existing of [ledgerState(store, key), ledgerState(store, thread)]) {
-    if (!existing) continue;
-    if (existing.state === "uncertain") return "uncertain";
-    if (existing.state === "posted" || existing.state === "verified") return "posted";
+  const key = postLedgerKey(day, item.source, item.externalId, item.url);
+  const thread = threadLedgerKey(item.source, item.externalId, item.url);
+  const claimed = claimKeys(store, key, thread, item.url);
+  if (claimed !== "owned") {
+    if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    return claimed;
   }
   const token = deps.token ?? readSecrets().reddit ?? "";
-  if (!token) return "failed";
-  writeLedger(store, key, "posting", item.url);
-  writeLedger(store, thread, "posting", item.url);
+  if (!token) {
+    finish(store, key, thread, "failed", item.url);
+    return "failed";
+  }
   const http = deps.fetch ?? fetch;
   const body = new URLSearchParams({ api_type: "json", thing_id: item.externalId, text: draft.body }).toString();
   let response: Response;
@@ -103,43 +151,39 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
       body,
     });
   } catch {
-    writeLedger(store, key, "uncertain", item.url);
-    writeLedger(store, thread, "uncertain", item.url);
+    finish(store, key, thread, "uncertain", item.url);
+    await notifyUncertain(store, draft.itemId, key, deps);
     return "uncertain";
   }
   if (response.status === 401 || response.status === 403) {
-    writeLedger(store, key, "failed", item.url);
-    writeLedger(store, thread, "failed", item.url);
+    finish(store, key, thread, "failed", item.url);
     return "failed";
   }
   if (!response.ok) {
     const next = response.status >= 500 ? "uncertain" : "failed";
-    writeLedger(store, key, next, item.url);
-    writeLedger(store, thread, next, item.url);
+    finish(store, key, thread, next, item.url);
+    if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
     return next;
   }
   let parsed: { id: string; permalink?: string } | undefined;
   try {
     parsed = commentId(await response.json());
   } catch {
-    writeLedger(store, key, "uncertain", item.url);
-    writeLedger(store, thread, "uncertain", item.url);
+    finish(store, key, thread, "uncertain", item.url);
+    await notifyUncertain(store, draft.itemId, key, deps);
     return "uncertain";
   }
   if (!parsed) {
-    writeLedger(store, key, "failed", item.url);
-    writeLedger(store, thread, "failed", item.url);
+    finish(store, key, thread, "failed", item.url);
     return "failed";
   }
   const postedUrl = parsed.permalink
     ? (parsed.permalink.startsWith("http") ? parsed.permalink : `https://www.reddit.com${parsed.permalink}`)
     : item.url;
-  writeLedger(store, key, "posted", postedUrl);
-  writeLedger(store, thread, "posted", postedUrl);
+  finish(store, key, thread, "posted", postedUrl);
   try {
     if (await verify(http, token, parsed.id)) {
-      writeLedger(store, key, "verified", postedUrl);
-      writeLedger(store, thread, "verified", postedUrl);
+      finish(store, key, thread, "verified", postedUrl);
     }
   } catch {
     /* posted stands if the re-read fails */
