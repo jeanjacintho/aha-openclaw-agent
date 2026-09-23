@@ -59,6 +59,8 @@ test("schema rejects a category outside the list and confidence outside 0..1", (
   assert.throws(() => classificationSchema.parse(valid({ confidence: 1.2 })), /confidence/);
   assert.throws(() => classificationSchema.parse(valid({ confidence: -0.01 })), /confidence/);
   assert.throws(() => classificationSchema.parse(valid({ topic: "evil.example/steal" })), /topic/);
+  assert.throws(() => classificationSchema.parse(valid({ topic: "---" })), /topic/);
+  assert.throws(() => classificationSchema.parse(valid({ topic: "_" })), /topic/);
   assert.deepEqual(classificationSchema.parse(valid({ relevant: false, about: null, isQuestion: false, reason: "idiom" })), valid({ relevant: false, about: "self", isQuestion: false, reason: "idiom" }));
   assert.deepEqual(classificationSchema.parse(valid()), valid());
 });
@@ -91,6 +93,25 @@ test("one invalid item in a batch does not send the rest to needs_review", async
   assert.equal(report.needsReview, 1);
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(good.id) as { state: string }).state, "relevant");
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(bad.id) as { state: string }).state, "needs_review");
+});
+
+test("a punctuation-only topic goes to needs_review and later items in the batch still save", async t => {
+  const store = await home(t);
+  const empty = insert(store, { externalId: "1" });
+  const good = insert(store, { externalId: "2", body: "also plow" });
+  const report = await classifyBatch(store, [empty, good], {
+    fetch: chatFetch({
+      results: [
+        { id: empty.id, ...valid({ topic: "---" }) },
+        { id: good.id, ...valid() },
+      ],
+    }),
+  });
+  assert.equal(report.needsReview, 1);
+  assert.equal(report.classified, 1);
+  assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(empty.id) as { state: string }).state, "needs_review");
+  assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(good.id) as { state: string }).state, "relevant");
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items WHERE state = 'new'").get() as { n: number }).n, 0);
 });
 
 test("an unknown competitor about value goes to needs_review", async t => {
