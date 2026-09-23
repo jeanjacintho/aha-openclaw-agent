@@ -1,5 +1,5 @@
 {
-  "name": "@plow/openclaw-agent-checks",
+  "name": "aha-agent",
   "private": true,
   "type": "module",
   "devDependencies": {

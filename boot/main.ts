@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readFile, mkdir, writeFile, rm } from "node:fs/promises";
+import { startAha } from "../aha/worker.js";
 import { startAgentIndex } from "./agent-index.js";
 import { renderConfig } from "./config.js";
 import { identityFromApi } from "./identity.js";
@@ -23,6 +24,7 @@ try {
   await writeFile("/var/lib/plow/openclaw.json", JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
   console.log(`plow-boot: identity resolved to ${identity.line.uid}`);
   startAgentIndex();
+  startAha();
   await startGateway(false, identity.mcp_url ?? undefined);
 } catch (error) {
   console.error(`plow-boot: parked: ${error instanceof Error ? error.message : String(error)}`);
