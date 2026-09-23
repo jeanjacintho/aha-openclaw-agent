@@ -1,5 +1,6 @@
 import { routeItem, type Role } from "../pipeline/route.ts";
 import { detectTrends, type TrendAlert } from "../pipeline/trends.ts";
+import { type SQLInputValue } from "node:sqlite";
 import { type Store } from "../store/db.ts";
 
 export type { Role } from "../pipeline/route.ts";
@@ -132,7 +133,7 @@ function competitorName(about: string) {
   return about.startsWith("competitor:") ? about.slice("competitor:".length) : about;
 }
 
-function topicCounts(s: Store, sql: string, params: unknown[]) {
+function topicCounts(s: Store, sql: string, params: SQLInputValue[]) {
   return (s.db.prepare(sql).all(...params) as { about: string; topic: string; n: number }[]).map(row => ({
     competitor: competitorName(row.about),
     topic: row.topic,
