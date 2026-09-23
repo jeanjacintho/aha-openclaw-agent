@@ -1,6 +1,7 @@
 import { type DigestModel } from "./build.ts";
 
-function when(iso: string) {
+function when(iso: string | null) {
+  if (!iso) return "";
   return iso.replace("T", " ").replace(/\.\d+Z$/, " UTC").replace(/Z$/, " UTC");
 }
 
@@ -8,12 +9,10 @@ function sourceLine(model: DigestModel, lang: string) {
   return model.sources.map(row => {
     const name = row.source === "hn" ? "HN" : row.source === "agent-index" ? "Agent Index" : row.source;
     const since = when(row.since);
-    if (lang.startsWith("pt")) {
-      const why = row.status === "limitada" ? "limite da API" : (row.detail || row.status);
-      return `${name} sem dados desde ${since} (${why})`;
-    }
-    const why = row.status === "limitada" ? "API limit" : (row.detail || row.status);
-    return `${name} has no data since ${since} (${why})`;
+    const pt = lang.startsWith("pt");
+    const why = row.status === "limitada" ? (pt ? "limite da API" : "API limit") : (row.detail || row.status);
+    if (!since) return pt ? `${name} sem dados (${why})` : `${name} has no data (${why})`;
+    return pt ? `${name} sem dados desde ${since} (${why})` : `${name} has no data since ${since} (${why})`;
   });
 }
 

@@ -1,3 +1,4 @@
+import { getConfig } from "../config.ts";
 import { openStore, type Store } from "../store/db.ts";
 
 export type SendResult = "sent" | "duplicate" | "uncertain" | "failed";
@@ -25,22 +26,26 @@ function paused(store: Store) {
   return (row?.paused ?? 0) !== 0;
 }
 
+function ownerChatUid(store: Store) {
+  return getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
+}
+
 function lookup(store: Store, key: string) {
   return store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(key) as { status: string } | undefined;
 }
 
-function write(store: Store, key: string, chatUid: string, status: SendResult, messageUid: string | null, at: string) {
-  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT (key) DO UPDATE SET status = excluded.status, message_uid = excluded.message_uid, updated_at = excluded.updated_at`)
-    .run(key, chatUid, status, messageUid, at, at);
+function claim(store: Store, key: string, chatUid: string, at: string) {
+  const inserted = store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at)
+    VALUES (?, ?, 'uncertain', NULL, ?, ?) ON CONFLICT (key) DO NOTHING`).run(key, chatUid, at, at);
+  if (inserted.changes === 1) return "owned";
+  const retried = store.db.prepare(`UPDATE deliveries SET status = 'uncertain', chat_uid = ?, updated_at = ?
+    WHERE key = ? AND status = 'failed'`).run(chatUid, at, key);
+  if (retried.changes === 1) return "owned";
+  return lookup(store, key)?.status ?? "uncertain";
 }
 
-async function isGroup(chatUid: string, http: typeof fetch) {
-  const response = await http(`${apiBase()}/v1/chats/${chatUid}`, { headers: headers() });
-  if (!response.ok) return true;
-  const chat = await response.json() as { participants?: unknown[] };
-  return (chat.participants?.length ?? 0) > 2;
+function finish(store: Store, key: string, status: "sent" | "failed" | "uncertain", messageUid: string | null, at: string) {
+  store.db.prepare("UPDATE deliveries SET status = ?, message_uid = ?, updated_at = ? WHERE key = ?").run(status, messageUid, at, key);
 }
 
 function uncertainStatus(status: number) {
@@ -51,13 +56,14 @@ export async function sendToChat(chatUid: string, text: string, key: string, dep
   const store = deps.store ?? openStore();
   const owned = !deps.store;
   try {
-    const existing = lookup(store, key);
-    if (existing?.status === "sent") return "duplicate";
-    if (existing?.status === "uncertain") return "uncertain";
-    if (existing) return existing.status as SendResult;
     const http = deps.fetch ?? fetch;
-    if (paused(store) && await isGroup(chatUid, http)) return "failed";
+    if (paused(store) && chatUid !== ownerChatUid(store)) return "failed";
     const at = (deps.now ?? (() => new Date()))().toISOString();
+    const claimed = claim(store, key, chatUid, at);
+    if (claimed !== "owned") {
+      if (claimed === "sent") return "duplicate";
+      return claimed as SendResult;
+    }
     let response: Response;
     try {
       response = await http(`${apiBase()}/v1/chats/${chatUid}/messages`, {
@@ -66,17 +72,20 @@ export async function sendToChat(chatUid: string, text: string, key: string, dep
         body: JSON.stringify({ body: text, attachment_uids: [] }),
       });
     } catch {
-      write(store, key, chatUid, "uncertain", null, at);
       return "uncertain";
     }
     if (response.ok) {
-      const payload = await response.json() as { uid?: string };
-      write(store, key, chatUid, "sent", payload.uid ?? null, at);
-      return "sent";
+      try {
+        const payload = await response.json() as { uid?: string };
+        finish(store, key, "sent", payload.uid ?? null, at);
+        return "sent";
+      } catch {
+        return "uncertain";
+      }
     }
-    const status = uncertainStatus(response.status) ? "uncertain" : "failed";
-    write(store, key, chatUid, status, null, at);
-    return status;
+    if (uncertainStatus(response.status)) return "uncertain";
+    finish(store, key, "failed", null, at);
+    return "failed";
   } finally {
     if (owned) store.close();
   }

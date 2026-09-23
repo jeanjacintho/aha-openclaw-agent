@@ -39,10 +39,10 @@ async function sendDigest() {
     const cfg = getConfig(store);
     const chat = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
     if (!chat) return;
-    const day = new Date().toISOString().slice(0, 10);
-    const model = buildDigest(store, "founder", day);
+    const until = new Date();
+    const model = buildDigest(store, "founder", until, cfg?.tz || "UTC");
     const text = renderDigest(model, cfg?.language || "pt");
-    await sendToChat(chat, text, `digest:${day}:founder`, { store });
+    await sendToChat(chat, text, `digest:${model.day}:founder`, { store });
   } finally {
     store.close();
   }
@@ -52,7 +52,14 @@ function digestHour() {
   const store = openStore();
   try {
     const cfg = getConfig(store);
-    return { hour: cfg?.digestHour ?? 9, tz: cfg?.tz || "UTC" };
+    const tz = cfg?.tz || "UTC";
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    } catch {
+      console.error(`aha: invalid tz ${tz}; digest uses UTC`);
+      return { hour: cfg?.digestHour ?? 9, tz: "UTC" };
+    }
+    return { hour: cfg?.digestHour ?? 9, tz };
   } finally {
     store.close();
   }
@@ -68,6 +75,7 @@ export function startAha(): { stop(): Promise<void> } | undefined {
       { name: "ingest", everyMs: 15 * 60 * 1000, run: ingestThenClassify },
       { name: "digest", dailyAt: daily, run: sendDigest },
     ]);
+    void handle.tick();
     console.log("aha: worker up");
     return { async stop() { handle.stop(); } };
   } catch (error) {

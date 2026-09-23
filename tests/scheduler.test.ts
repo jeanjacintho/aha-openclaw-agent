@@ -36,6 +36,40 @@ test("dailyAt fires once when the hour repeats after a fall-back", async () => {
   assert.deepEqual(fired, ["2026-11-01T05:00:00.000Z"]);
 });
 
+test("everyMs runs on the first tick", async () => {
+  const runs: string[] = [];
+  const now = new Date("2026-09-23T00:00:00.000Z");
+  const handle = schedule([{
+    name: "ingest",
+    everyMs: 15 * 60 * 1000,
+    run: async () => { runs.push(now.toISOString()); },
+  }], { now: () => now, intervalMs: 60_000 });
+  handle.stop();
+  await handle.tick(now);
+  assert.deepEqual(runs, ["2026-09-23T00:00:00.000Z"]);
+});
+
+test("a second tick is a no-op while the previous job is still running", async () => {
+  let runs = 0;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const handle = schedule([{
+    name: "ingest",
+    everyMs: 1,
+    run: async () => {
+      runs += 1;
+      await held;
+    },
+  }], { now: () => new Date("2026-09-23T00:00:00.000Z"), intervalMs: 60_000 });
+  handle.stop();
+  const first = handle.tick();
+  await handle.tick();
+  assert.equal(runs, 1);
+  release();
+  await first;
+  assert.equal(runs, 1);
+});
+
 test("a failing job is logged and does not stop the next cycle", async () => {
   const runs: string[] = [];
   const errors: string[] = [];
@@ -60,6 +94,6 @@ test("a failing job is logged and does not stop the next cycle", async () => {
   } finally {
     console.error = original;
   }
-  assert.deepEqual(runs, ["2026-09-23T00:00:01.000Z", "2026-09-23T00:00:02.000Z"]);
+  assert.deepEqual(runs, ["2026-09-23T00:00:00.000Z", "2026-09-23T00:00:01.000Z", "2026-09-23T00:00:02.000Z"]);
   assert.match(errors[0], /ingest/);
 });

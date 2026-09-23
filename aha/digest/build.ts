@@ -14,7 +14,7 @@ export type DigestItem = {
 export type SourceHealth = {
   source: string;
   status: string;
-  since: string;
+  since: string | null;
   detail: string | null;
 };
 
@@ -38,22 +38,33 @@ const CATEGORY_RANK: Record<string, number> = {
   security: 0, legal: 1, bug: 2, complaint: 3, feature_request: 4, question: 5, comparison: 6, pricing: 7, praise: 8, other: 9,
 };
 
-function excerpt(body: string | null) {
-  return (body ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function excerpt(body: string | null) {
+  return (body ?? "")
+    .replace(/\[[^\]]*\]\([^)]*\)/g, "[link]")
+    .replace(/https?:\/\/\S+/gi, "[link]")
+    .replace(/\bwww\.\S+/gi, "[link]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
 }
 
-function categoriesFor(role: Role) {
-  return ROLE_CATEGORIES[role];
+function ymd(until: Date, tz: string) {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  return fmt.format(until);
 }
 
-export function buildDigest(s: Store, role: Role, day: string): DigestModel {
-  const readCount = (s.db.prepare("SELECT COUNT(*) AS n FROM items WHERE substr(fetched_at, 1, 10) = ?").get(day) as { n: number }).n;
-  const wanted = categoriesFor(role);
+export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): DigestModel {
+  const untilIso = until.toISOString();
+  const sinceIso = new Date(until.getTime() - DAY_MS).toISOString();
+  const readCount = (s.db.prepare("SELECT COUNT(*) AS n FROM items WHERE fetched_at > ? AND fetched_at <= ?").get(sinceIso, untilIso) as { n: number }).n;
+  const wanted = ROLE_CATEGORIES[role];
   const rows = s.db.prepare(`SELECT items.id, items.body, items.url, items.state,
       classifications.category, classifications.urgency, classifications.topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.state = 'relevant' AND substr(items.fetched_at, 1, 10) = ?`).all(day) as {
+    WHERE items.state = 'relevant' AND items.fetched_at > ? AND items.fetched_at <= ?`).all(sinceIso, untilIso) as {
     id: number; body: string | null; url: string | null; state: string;
     category: string | null; urgency: string | null; topic: string | null;
   }[];
@@ -73,8 +84,11 @@ export function buildDigest(s: Store, role: Role, day: string): DigestModel {
       excerpt: excerpt(row.body),
       url: row.url,
     }));
-  const sources = s.db.prepare(`SELECT source, status, window_end AS since, detail
-    FROM source_runs WHERE id IN (SELECT MAX(id) FROM source_runs GROUP BY source)
-    AND status != 'ok'`).all() as SourceHealth[];
-  return { day, role, readCount, items: ranked, sources };
+  const sources = s.db.prepare(`SELECT r.source, r.status, ok.since, r.detail
+    FROM source_runs r
+    JOIN (SELECT source, MAX(id) AS id FROM source_runs GROUP BY source) latest ON latest.id = r.id
+    LEFT JOIN (SELECT source, MAX(window_end) AS since FROM source_runs WHERE status = 'ok' GROUP BY source) ok
+      ON ok.source = r.source
+    WHERE r.status != 'ok'`).all() as SourceHealth[];
+  return { day: ymd(until, tz), role, readCount, items: ranked, sources };
 }

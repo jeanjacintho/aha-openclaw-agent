@@ -14,6 +14,13 @@ export type AhaConfig = {
 function assertConfig(config: AhaConfig) {
   const name = config?.company?.name;
   if (typeof name !== "string" || name.trim().length === 0) throw new Error("config requires company.name");
+  if (config.tz) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: config.tz });
+    } catch {
+      throw new Error("config tz is not a valid IANA timezone");
+    }
+  }
 }
 
 export function getConfig(store: Store): AhaConfig | null {

@@ -80,6 +80,14 @@ test("saveConfig rejects a config without company.name", async t => {
   assert.deepEqual(getConfig(store), { company: { name: "Plow" } });
 });
 
+test("saveConfig rejects an invalid IANA timezone", async t => {
+  const store = openStore(await home(t));
+  t.after(() => store.close());
+  assert.throws(() => saveConfig(store, { company: { name: "Plow" }, tz: "Not/AZone" }), /valid IANA timezone/);
+  saveConfig(store, { company: { name: "Plow" }, tz: "America/Sao_Paulo" });
+  assert.equal(getConfig(store)?.tz, "America/Sao_Paulo");
+});
+
 test("secrets.json is created with mode 0600", async t => {
   const dir = await home(t);
   writeSecrets(dir, { github: "token" });

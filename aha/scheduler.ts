@@ -40,31 +40,37 @@ export function schedule(jobs: ScheduledJob[], deps: ScheduleDeps = {}): Schedul
   const lastEvery = new Map<string, number>();
   const lastDaily = new Map<string, string>();
   let prev = deps.now?.() ?? new Date();
+  let running = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   async function tick(explicit?: Date) {
+    if (running) return;
+    running = true;
     const now = explicit ?? deps.now?.() ?? new Date();
-    for (const job of jobs) {
-      try {
-        if (job.everyMs !== undefined) {
-          const last = lastEvery.get(job.name);
-          if (last === undefined) lastEvery.set(job.name, now.getTime());
-          else if (now.getTime() - last >= job.everyMs) {
-            lastEvery.set(job.name, now.getTime());
-            await job.run?.();
+    try {
+      for (const job of jobs) {
+        try {
+          if (job.everyMs !== undefined) {
+            const last = lastEvery.get(job.name);
+            if (last === undefined || now.getTime() - last >= job.everyMs) {
+              lastEvery.set(job.name, now.getTime());
+              await job.run?.();
+            }
           }
-        }
-        if (job.dailyAt) {
-          if (dueDaily(prev, now, job.dailyAt.hour, job.dailyAt.tz, lastDaily.get(job.name))) {
-            lastDaily.set(job.name, parts(now, job.dailyAt.tz).ymd);
-            await job.run?.();
+          if (job.dailyAt) {
+            if (dueDaily(prev, now, job.dailyAt.hour, job.dailyAt.tz, lastDaily.get(job.name))) {
+              lastDaily.set(job.name, parts(now, job.dailyAt.tz).ymd);
+              await job.run?.();
+            }
           }
+        } catch (error) {
+          console.error(`aha: job ${job.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
-      } catch (error) {
-        console.error(`aha: job ${job.name} failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+      prev = now;
+    } finally {
+      running = false;
     }
-    prev = now;
   }
 
   const intervalMs = deps.intervalMs ?? 15_000;
