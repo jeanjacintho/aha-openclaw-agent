@@ -1,3 +1,4 @@
+import { trendSentence } from "../pipeline/trends.ts";
 import { type DigestModel } from "./build.ts";
 
 function when(iso: string | null) {
@@ -19,7 +20,8 @@ function sourceLine(model: DigestModel, lang: string) {
 export function renderDigest(m: DigestModel, lang: string): string {
   const pt = lang.startsWith("pt");
   const health = sourceLine(m, lang);
-  if (m.items.length === 0) {
+  const trends = m.trends.map(alert => trendSentence(alert, lang));
+  if (m.items.length === 0 && trends.length === 0) {
     const line = pt
       ? `Nada que mude decisão hoje. ${m.readCount} menções lidas.`
       : `Nothing that changes a decision today. ${m.readCount} mentions read.`;
@@ -30,5 +32,5 @@ export function renderDigest(m: DigestModel, lang: string): string {
     const url = item.url ? ` ${item.url}` : "";
     return `• [${item.urgency}] ${item.topic || item.category}: ${item.excerpt}${url}`;
   });
-  return [heading, ...items, ...health].join("\n");
+  return [heading, ...items, ...trends, ...health].join("\n");
 }

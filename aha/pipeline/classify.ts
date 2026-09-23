@@ -3,6 +3,7 @@ import { complete, type CompleteDeps } from "../llm/client.ts";
 import { classifySystemPrompt } from "../llm/prompts.ts";
 import { classifyLlmSchema, parseClassification, type Classification } from "../llm/schemas.ts";
 import { type Store } from "../store/db.ts";
+import { assignTopic, listTopics, topicLabel } from "./topics.ts";
 import { stateFromClassification } from "./relevance.ts";
 
 export const CLASSIFY_BATCH_SIZE = 20;
@@ -55,6 +56,7 @@ function review(store: Store, id: number) {
 }
 
 function save(store: Store, id: number, c: Classification) {
+  const topic = topicLabel(store, assignTopic(store, c.topic));
   store.db.prepare("UPDATE items SET state = ? WHERE id = ?").run(stateFromClassification(c), id);
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -67,7 +69,7 @@ function save(store: Store, id: number, c: Classification) {
       urgency = excluded.urgency,
       about = excluded.about,
       confidence = excluded.confidence`).run(
-    id, c.sentiment, c.category, c.topic, c.lang, c.isQuestion ? 1 : 0, c.urgency, c.about, c.confidence,
+    id, c.sentiment, c.category, topic, c.lang, c.isQuestion ? 1 : 0, c.urgency, c.about, c.confidence,
   );
 }
 
@@ -86,7 +88,7 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
   const run = deps.complete ?? complete;
   const result = await run({
     purpose: "classify",
-    system: classifySystemPrompt(cfg, feedbackExamples(s)),
+    system: classifySystemPrompt(cfg, feedbackExamples(s), listTopics(s).map(row => row.label)),
     data: { posts: postsFor(batch) },
     schema: classifyLlmSchema,
   }, deps);
