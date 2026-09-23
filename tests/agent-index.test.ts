@@ -97,10 +97,10 @@ test("a failed sync still reports", async t => {
   assert.deepEqual(argv(calls), [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
 });
 
-test("a failed export still reports", async t => {
+test("an unreadable OpenClaw store is the client's to report, and the pass still runs", async t => {
+  // Boot no longer reads that store: the client does, and it records the read
+  // failure itself so a partial report never replaces a complete one.
   env(t, { AGENT_ID: "my-agent", PLOW_API_BASE: "https://api.example" });
-  const errors: string[] = [];
-  t.mock.method(console, "error", (line: string) => { errors.push(String(line)); });
   const state = await stateDir(t);
   const db = path.join(state, "agents", "main", "agent", "openclaw-agent.sqlite");
   await fs.mkdir(path.dirname(db), { recursive: true });
@@ -109,5 +109,4 @@ test("a failed export still reports", async t => {
   startAgentIndex(300_000, state)?.close?.();
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(argv(calls), [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
-  assert.match(errors.join("\n"), /agent-index:/);
 });

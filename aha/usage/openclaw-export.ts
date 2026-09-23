@@ -1,9 +1,6 @@
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 
 export type ExportResult = { sessions: number; added: number; errors: string[] };
-
-type TranscriptRow = { session_id: string; seq: number; event_json: string };
 
 /** A session id becomes a file name. These would leave the output directory. */
 function unsafe(id: string) {
@@ -78,73 +75,4 @@ function writeAtomic(file: string, lines: string[]) {
 
 function oneLine(eventJson: string) {
   return eventJson.includes("\n") ? JSON.stringify(JSON.parse(eventJson)) : eventJson;
-}
-
-export function exportOpenClawSessions(stateDir: string, outRoot: string): ExportResult {
-  const errors: string[] = [];
-  let sessions = 0;
-  let added = 0;
-  try {
-    prepareOutputRoot(outRoot);
-    let agents: string[];
-    try {
-      agents = readdirSync(`${stateDir}/agents`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { sessions: 0, added: 0, errors: [`no OpenClaw session database under ${stateDir}`] };
-      }
-      throw error;
-    }
-    const databases = agents.filter(agent => !unsafe(agent)).map(agent => ({
-      agent,
-      file: `${stateDir}/agents/${agent}/agent/openclaw-agent.sqlite`,
-    }));
-    if (databases.length === 0) return { sessions: 0, added: 0, errors: [`no OpenClaw session database under ${stateDir}`] };
-    for (const { agent, file } of databases) {
-      let present = false;
-      try { present = lstatSync(file).isFile(); } catch { present = false; }
-      if (!present) {
-        errors.push(`no OpenClaw session database at ${file}`);
-        continue;
-      }
-      let db: DatabaseSync | undefined;
-      try {
-        db = new DatabaseSync(file, { readOnly: true });
-        const rows = db.prepare("SELECT session_id, seq, event_json FROM transcript_events ORDER BY session_id, seq").all() as TranscriptRow[];
-        const bySession = new Map<string, TranscriptRow[]>();
-        for (const row of rows) {
-          const list = bySession.get(row.session_id) ?? [];
-          list.push(row);
-          bySession.set(row.session_id, list);
-        }
-        for (const [sessionId, events] of bySession) {
-          if (unsafe(sessionId)) {
-            errors.push(`refusing session id ${sessionId}`);
-            continue;
-          }
-          sessions += 1;
-          const dest = `${outRoot}/${agent}/sessions/${sessionId}.jsonl`;
-          mkdirSync(`${outRoot}/${agent}/sessions`, { recursive: true });
-          const prior = readLines(dest);
-          let grew = 0;
-          for (const event of events) {
-            const id = eventId(event.event_json, sessionId, event.seq);
-            if (prior.ids.has(id)) continue;
-            prior.lines.push(oneLine(event.event_json));
-            prior.ids.add(id);
-            grew += 1;
-          }
-          if (grew > 0) writeAtomic(dest, prior.lines);
-          added += grew;
-        }
-      } catch (error) {
-        errors.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        db?.close();
-      }
-    }
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
-  }
-  return { sessions, added, errors };
 }
