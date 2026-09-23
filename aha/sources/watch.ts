@@ -4,6 +4,7 @@ import { agentIndexSource } from "./agent-index.ts";
 import { githubSource, parseGithubRepos } from "./github.ts";
 import { hnSource } from "./hn.ts";
 import { productHuntSource } from "./producthunt.ts";
+import { redditSource } from "./reddit.ts";
 import { type SourceAdapter } from "./types.ts";
 
 export function agentIndexSlug(cfg: AhaConfig | null) {
@@ -16,5 +17,6 @@ export function watchAdapters(cfg: AhaConfig | null, secrets: Secrets = readSecr
     agentIndexSource({ token: secrets.github ?? "", slug: agentIndexSlug(cfg) }),
     productHuntSource({ token: secrets.productHunt ?? "" }),
     githubSource({ token: secrets.github ?? "", repos: parseGithubRepos(cfg) }),
+    redditSource({ token: secrets.reddit ?? "" }),
   ];
 }

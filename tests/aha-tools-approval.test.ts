@@ -187,6 +187,22 @@ test("the owner can approve an other item that routes to no role", async t => {
   assert.deepEqual(result.details, { sent: true });
 });
 
+test("aha_complaint drops autonomy to L1", async t => {
+  const dir = await home(t);
+  const { itemId } = seed(dir, { category: "question" });
+  const store = openStore(dir);
+  store.db.prepare("INSERT INTO autonomy (source, category, level, streak, suggested) VALUES ('hn', 'question', 'L2', 5, 0)").run();
+  store.close();
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_complaint")!.execute("call", { itemId: `AHA-${itemId}`, reason: "tone deaf" });
+  assert.equal(result.isError ?? false, false);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  const row = after.db.prepare("SELECT level, streak FROM autonomy WHERE source = 'hn' AND category = 'question'").get() as { level: string; streak: number };
+  assert.equal(row.level, "L1");
+  assert.equal(row.streak, 0);
+});
+
 test("a produto member cannot approve a marketing draft", async t => {
   const dir = await home(t);
   const { itemId } = seed(dir, { category: "praise" });

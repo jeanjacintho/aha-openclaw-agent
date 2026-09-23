@@ -1,6 +1,7 @@
 import { getConfig } from "../config.ts";
 import { type Store } from "../store/db.ts";
-import { validateReply, type Draft } from "./drafts.ts";
+import { validateReply } from "./validate.ts";
+import { postLedgerKey, redditSubreddit, threadLedgerKey } from "./reddit-url.ts";
 
 export type PolicyResult = { allow: true } | { allow: false; reasons: string[] };
 
@@ -18,10 +19,13 @@ const RED_LINE = new Set(["security", "legal", "pricing"]);
 const RED_TOPIC = /imprensa|press|ameaça|threat|saúde|health|política|politic|dado pessoal|pii/i;
 const TOTAL_DAY = 10;
 const COMMUNITY_DAY = 3;
+const COUNTED = ["posting", "posted", "ready", "verified", "uncertain"] as const;
 
 export function isRedLine(category: string | null | undefined, topic: string | null | undefined) {
   return RED_LINE.has(category ?? "") || RED_TOPIC.test(topic ?? "");
 }
+
+type Draft = { id: number; itemId: number; body: string; state: string };
 
 type Row = {
   source: string;
@@ -47,12 +51,12 @@ function mentioned(hay: string, names: string[]) {
 }
 
 function countLedger(store: Store, like: string) {
-  return (store.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE key LIKE ? AND state IN ('posting', 'posted', 'ready')").get(like) as { n: number }).n;
+  return (store.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE key LIKE ? AND state IN ('posting', 'posted', 'ready', 'verified', 'uncertain')").get(like) as { n: number }).n;
 }
 
-function threadTaken(store: Store, source: string, externalId: string) {
-  const row = store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(`thread:${source}:${externalId}`) as { state: string } | undefined;
-  return row != null && ["posting", "posted", "ready"].includes(row.state);
+function threadTaken(store: Store, source: string, externalId: string, url: string | null) {
+  const row = store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(threadLedgerKey(source, externalId, url)) as { state: string } | undefined;
+  return row != null && (COUNTED as readonly string[]).includes(row.state);
 }
 
 export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult {
@@ -76,8 +80,9 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
   if ((row.confidence ?? 0) < 0.8) reasons.push(POLICY.confidence);
   const day = ymd(now);
   const total = countLedger(store, `post:${day}:%`);
-  const community = countLedger(store, `post:${day}:${row.source}:%`);
-  if (total >= TOTAL_DAY || community >= COMMUNITY_DAY || threadTaken(store, row.source, row.external_id)) {
+  const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
+  const community = countLedger(store, sub ? `post:${day}:reddit:${sub}:%` : `post:${day}:${row.source}:%`);
+  if (total >= TOTAL_DAY || community >= COMMUNITY_DAY || threadTaken(store, row.source, row.external_id, row.url)) {
     reasons.push(POLICY.rateLimit);
   }
   const valid = validateReply(draft.body, {
@@ -98,8 +103,10 @@ export function recordReady(store: Store, draft: Draft, now: Date) {
   } | undefined;
   if (!row) return;
   const day = ymd(now);
-  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO UPDATE SET state = 'ready', url = excluded.url")
-    .run(`post:${day}:${row.source}:${row.external_id}`, row.url);
-  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO UPDATE SET state = 'ready', url = excluded.url")
-    .run(`thread:${row.source}:${row.external_id}`, row.url);
+  const postKey = postLedgerKey(day, row.source, row.external_id, row.url);
+  const threadKey = threadLedgerKey(row.source, row.external_id, row.url);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO NOTHING")
+    .run(postKey, row.url);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO NOTHING")
+    .run(threadKey, row.url);
 }
