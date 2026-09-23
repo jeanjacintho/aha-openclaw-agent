@@ -11,8 +11,8 @@ export async function classifyNewItems(store: Store, deps?: ClassifyDeps) {
   for (let i = 0; i < items.length; i += 20) await classifyBatch(store, items.slice(i, i + 20), deps);
 }
 
-export function scheduledDigestKey(day: string, role: Role = "founder") {
-  return `digest:${day}:${role}`;
+export function scheduledDigestKey(day: string, role: Role = "founder", chatUid?: string) {
+  return chatUid ? `digest:${day}:${role}:${chatUid}` : `digest:${day}:${role}`;
 }
 
 export function digestNowKey(at: Date) {
@@ -34,14 +34,16 @@ export async function deliverDigest(store: Store, deps: SendDeps & ClassifyDeps 
   const tz = cfg?.tz || "UTC";
   const lang = cfg?.language || "pt";
   const founder = buildDigest(store, "founder", until, tz);
-  const dmResult = await sendToChat(ownerDm, renderDigest(founder, lang), deps.key ?? scheduledDigestKey(founder.day, "founder"), {
+  const dmKey = deps.key ?? scheduledDigestKey(founder.day, "founder", ownerDm);
+  const dmResult = await sendToChat(ownerDm, renderDigest(founder, lang), dmKey, {
     store, fetch: deps.fetch, now: deps.now,
   });
   for (const role of ROLES) {
     const chat = cfg?.roleChats?.[role];
     if (!chat || chat === ownerDm) continue;
     const model = buildDigest(store, role, until, tz);
-    await sendToChat(chat, renderDigest(model, lang), deps.key ? `${deps.key}:${role}` : scheduledDigestKey(model.day, role), {
+    const key = deps.key ? `${deps.key}:${role}:${chat}` : scheduledDigestKey(model.day, role, chat);
+    await sendToChat(chat, renderDigest(model, lang), key, {
       store, fetch: deps.fetch, now: deps.now,
     });
   }

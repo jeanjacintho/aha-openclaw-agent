@@ -215,13 +215,15 @@ test("deliverDigest sends each role slice to its group with a separate key", asy
   const until = new Date("2026-09-22T20:00:00.000Z");
   assert.equal(await deliverDigest(store, { now: () => until }), "sent");
   assert.equal(messages.some(row => row.url.includes("/chats/cht_dm/messages") && row.body.includes("(founder)")), true);
+  assert.equal(messages.some(row => row.url.includes("/chats/cht_founder/messages") && row.body.includes("(founder)")), true);
   assert.equal(messages.some(row => row.url.includes("/chats/cht_marketing/messages") && row.body.includes("(marketing)")), true);
   assert.equal(messages.some(row => row.url.includes("/chats/cht_engenharia/messages") && row.body.includes("(engenharia)")), true);
   const keys = (store.db.prepare("SELECT key FROM deliveries ORDER BY key").all() as { key: string }[]).map(row => row.key);
   assert.deepEqual(keys, [
-    "digest:2026-09-22:engenharia",
-    "digest:2026-09-22:founder",
-    "digest:2026-09-22:marketing",
-    "digest:2026-09-22:produto",
+    "digest:2026-09-22:engenharia:cht_engenharia",
+    "digest:2026-09-22:founder:cht_dm",
+    "digest:2026-09-22:founder:cht_founder",
+    "digest:2026-09-22:marketing:cht_marketing",
+    "digest:2026-09-22:produto:cht_produto",
   ]);
 });
