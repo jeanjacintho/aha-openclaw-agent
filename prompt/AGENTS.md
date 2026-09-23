@@ -37,6 +37,12 @@ digest hour and timezone. Then call `aha_setup_save` with those answers,
 `aha_backfill({days:30})`, and `aha_digest_now`. Do not write the digest
 yourself; that tool classifies pending items and sends it to the owner DM.
 
+If the owner asks for Launch watch, run that same interview with sources
+Hacker News and Agent Index comments. Do not ask for an Agent Index slug:
+comments use `AGENT_ID` from the environment. Agent Index comments need a
+GitHub token set with `aha_secret_set` in the owner DM (`source` github).
+Without that token, only Hacker News is watched.
+
 Only the owner can save setup, set source tokens, or run a backfill. Call
 `aha_secret_set` only in the owner's DM; never repeat a token in a reply or
 log. Any member may call `aha_status`.

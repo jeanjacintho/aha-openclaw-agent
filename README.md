@@ -2,19 +2,28 @@
 
 AHA watches what the public says about a company (and later its competitors),
 then texts the owner a daily digest on a Plow phone line. Milestone 1 listens
-to **Hacker News** and **Agent Index comments** — no social-network keys.
+to **Hacker News** (no key) and **Agent Index comments** (GitHub token required).
 
 It runs on the Plow OpenClaw base (`2026.9.4`). You talk to it by texting the
 line. The first owner message starts the conversation; there is no greeting
 before that.
 
+## Once (clone and login)
+
+Python 3.11+, Docker, and [plow-agents](https://github.com/plow-pbc/plow-agents)
+on `PATH`. Then, once per machine:
+
+```sh
+git clone https://github.com/jeanjacintho/aha-openclaw-agent.git
+cd aha-openclaw-agent
+plow-agents login
+```
+
+Text the activation phrase. After that, work from this repository root.
+
 ## Install (3 commands)
 
-Install [plow-agents](https://github.com/plow-pbc/plow-agents) (Python 3.11+,
-Docker, Compose 2.24+). One-time: `plow-agents login` and text the activation
-phrase. `plow-agents lines` prints the number you will text and a free `LINE_UID`.
-
-From this repository root:
+`plow-agents lines` prints the number you will text and a free `LINE_UID`.
 
 ```sh
 plow-agents lines
@@ -23,8 +32,8 @@ docker compose logs -f
 ```
 
 That mints `./plow-credentials` (gitignored), builds the image, and starts the
-`agent` service. Text the selected number as the owner and check that a reply
-arrives.
+`agent` service. Compose fails immediately if that credential file is missing.
+Text the selected number as the owner and check that a reply arrives.
 
 `docker compose down` keeps the named state volume. `docker compose down -v`
 deletes it, so the next boot starts with fresh agent state. When finished:
@@ -53,24 +62,28 @@ inject `PLOW_AGENT_TOKEN`; local Compose reads it from `./plow-credentials`.
 
 ## Launch watch
 
-Launch watch is the no-keys setup for a team that just shipped an agent:
-**Hacker News + Agent Index comments** (`agent:<slug>` discussions on
-`plow-pbc/agent-index-comments`).
+Launch watch is the setup for a team that just shipped an agent: **Hacker News
++ Agent Index comments** (`agent:<slug>` discussions on
+`plow-pbc/agent-index-comments`). HN needs no key. Agent Index comments need a
+**GitHub token** (public-repo read is enough). Without that token, only Hacker
+News is watched.
 
 After the container is running, text the line as the owner and ask for Launch
 watch. The agent interviews you in at most seven questions (company name,
 aliases, words that are not you, domain, competitors, sources, tone/language,
 digest hour and timezone), then saves setup, backfills up to 30 days, and
-sends the first digest to the owner DM.
+sends the first digest to the owner DM. The Agent Index slug is **not** an
+interview field: comments use `AGENT_ID` from the environment (`aha` by
+default). In the owner DM, set the GitHub token with `aha_secret_set` (never
+paste a token in a group).
 
 Suggested answers for Launch watch:
 
 - **Sources:** Hacker News and Agent Index comments
 - **Company / product:** the agent or product name as people write it
-- **Agent Index slug:** the listing id (`AGENT_ID`) so comments on that page are watched
-- **Keys:** none. A GitHub token is optional (GraphQL). Product Hunt, GitHub
-  product repos, and Reddit are later sources and need their own tokens via
-  `aha_secret_set` in the owner DM — never paste a token in a group.
+- **GitHub token:** required for Agent Index comments; set only in the owner DM
+- **Product Hunt, GitHub product repos, Reddit:** later sources; their tokens
+  also go through `aha_secret_set` in the owner DM
 
 Any member may ask `aha_status`. Only the owner can save setup, set secrets, or
 run a backfill.
@@ -89,9 +102,14 @@ file next to `compose.yml`; the image also bakes the same defaults):
 
 | Variable | Default | Role |
 |---|---|---|
-| `AGENT_ID` | `aha` | Index listing id. Empty or unset in the image would skip register and report. |
+| `AGENT_ID` | `aha` | Index listing id, and the slug watched for `agent:<slug>` comments. |
 | `AGENT_NAME` | `AHA` | Sent on first register only, when set. |
 | `AGENT_BLURB` | see `compose.yml` / `Dockerfile` | Same: sent on first register only, when set (keep ≤ 140 characters). |
+
+Compose uses `${AGENT_ID-aha}`: **unset** becomes `aha`; an explicit empty
+`AGENT_ID=` stays empty and skips register and report (that empty value also
+overrides the image default). `${AGENT_ID:-aha}` would turn an empty value
+into `aha`, so it is not used.
 
 Override without rebuilding, for a local run:
 
@@ -104,7 +122,7 @@ Name and blurb are sent only when registering a new install. Later edits on the
 Index page are not overwritten every pass. `PLOW_API_BASE` is the API root
 without `/v1`. Set `PLOW_AGENT_TOKEN` locally; cloud hosts can inject it.
 
-`openclaw.json` is boot-owned: runtime config edits do not survive a restart.
+`openclaw.json` is boot-owned: runtime config edits (`config set`, `set-identity` emoji/avatar changes, and plugin installs) do not survive a restart.
 Workspace `BOOTSTRAP.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are also
 boot-owned and removed at every startup; `AGENTS.md` is boot-rendered. Do not
 store durable agent state in these files. Durable AHA state is SQLite under
@@ -112,17 +130,42 @@ store durable agent state in these files. Durable AHA state is SQLite under
 
 ## Behaviour and failures
 
+Set `PLOW_API_BASE` to the API root without `/v1`. Local runs also need
+`PLOW_AGENT_TOKEN`; cloud hosts can inject it. Use an API endpoint you control.
+Agent state lives in the persistent `/var/lib/plow` volume.
+
 The gateway starts after one bounded identity lookup, even before the owner has a
 chat. Identity lookup tolerates 401/403 for 120 seconds and retries network/429/5xx
 failures ten times. Invalid identity or exhausted boot retries leave the
 container running with a diagnostic error. The plugin subscribes before listing
 chats, discovers the active owner DM from its roster, and buffers messages during
 baseline recovery. Multiple owner DMs among the received listing and live chats
-stop the chat account until the container restarts.
+stop the chat account until the container restarts. A cached owner may be used
+from a truncated listing; uniqueness is checked only among discovered chats.
+Without a cached owner, the fallback lookup refuses truncated listings.
+The API currently returns complete listings.
+Socket drops reconnect with backoff; the plugin never re-reads identity.
 
 Without a checkpoint, an earlier owner-DM message buffered during baseline recovery runs first.
 Otherwise, the newest inbound member message is first contact, even if sent before the plugin connects.
-Chat checkpoints survive restarts. Replies stay in their source conversation.
+Chat checkpoints survive restarts. Chats omitted from a truncated listing
+recover on their first live frame. Optional history failures still dispatch the
+current message. Email threads have separate sessions, shared by their senders,
+but no history backfill. The owner's phone DM uses the main session; other DMs
+and groups have separate sessions.
+
+Shutdown-interrupted chat turns can recover. Incomplete live turns are logged
+and acknowledged, with one neutral notice that the request may have partly
+happened. A failed or uncertain notice is not retried. An ambiguous delivery is
+not retried; a crash after sending but before checkpointing can duplicate a reply.
+
+Replies stay in their source conversation. The agent can start trusted groups
+with the owner and send follow-ups to active conversations on its own lines.
+Clarifications are ordinary replies. When connected through Latch, the owner's
+Mac provides its tools and instructions. Mac unavailability does not prevent
+texting. Long-running MCP responses stream without a fixed bridge timeout;
+client disconnects cancel the upstream request. A bridge crash restarts the
+bridge while the gateway continues.
 
 Public mention text is data, never instructions. The worker classify/LLM path
 runs without tools; invalid model output goes to `needs_review`.
@@ -133,10 +176,12 @@ This agent does not isolate hostile users. Every turn retains its tools; the
 model judges authority from the fetched roster, trust flag, conversation and
 owner instructions. AHA tools that change state also check the requester in
 code: only the owner can save setup, set secrets, or backfill. Only trust
-people who may use the owner's resources.
+people who may use the owner's resources, including their Mac. Explicit sends
+can target other served conversations.
 
 Groups use their own history and omit root MEMORY.md. Cross-conversation recall
-is disabled.
+is disabled, and native session tools cannot read unrelated conversations from
+group or peer sessions. Shared files and tools are not privacy boundaries.
 
 ## Development
 
