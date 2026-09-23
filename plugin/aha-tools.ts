@@ -479,6 +479,7 @@ export function registerAhaTools(api: {
     async execute(_id, args) {
       const denied = requireMember(ctx);
       if (denied) return denied;
+      const requesterSenderId = ctx.requesterSenderId!;
       const itemId = typeof args.itemId === "number" ? args.itemId : Number(args.itemId);
       if (!Number.isInteger(itemId) || itemId < 1) return fail("itemId is required");
       const store = openStore();
@@ -490,9 +491,9 @@ export function registerAhaTools(api: {
         const mine = claimRoles(store, ctx);
         if (!roles.some(role => mine.includes(role))) return fail("not a member of this item's role");
         const claimed = store.db.prepare("UPDATE items SET state = 'assigned', assignee = ? WHERE id = ? AND state = 'relevant'")
-          .run(ctx.requesterSenderId, itemId);
+          .run(requesterSenderId, itemId);
         if (claimed.changes !== 1) return fail("item is not claimable");
-        return ok({ itemId, state: "assigned", assignee: ctx.requesterSenderId });
+        return ok({ itemId, state: "assigned", assignee: requesterSenderId });
       } finally {
         store.close();
       }
@@ -864,6 +865,7 @@ export function registerAhaTools(api: {
     async execute(_id, args) {
       const denied = requireMember(ctx);
       if (denied) return denied;
+      const requesterSenderId = ctx.requesterSenderId!;
       const topic = typeof args.topic === "string" ? args.topic.trim() : "";
       const dueRaw = typeof args.due === "string" ? args.due.trim() : "";
       const ownerUid = typeof args.ownerUid === "string" ? args.ownerUid.trim() : "";
@@ -890,7 +892,7 @@ export function registerAhaTools(api: {
       try {
         const at = new Date().toISOString();
         const inserted = store.db.prepare("INSERT INTO promise_proposals (topic, due, owner, proposed_by, created_at) VALUES (?, ?, ?, ?, ?)")
-          .run(topic, due, owner.uid, ctx.requesterSenderId, at);
+          .run(topic, due, owner.uid, requesterSenderId, at);
         const proposalId = Number(inserted.lastInsertRowid);
         const confirmText = `Registrado: ${topic}, prazo ${due}, dono ${owner.displayName}. Certo? Confirme com aha_promise_confirm({proposalId:${proposalId}}).`;
         return ok({ proposalId, confirmText, topic, due, ownerUid: owner.uid, ownerName: owner.displayName });
