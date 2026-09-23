@@ -60,6 +60,17 @@ test("uniqueTermsCaseInsensitive drops case-only duplicates", () => {
   assert.deepEqual(uniqueTermsCaseInsensitive(["Plow", "plow", " PLOW ", "Plow Inc"]), ["Plow", "Plow Inc"]);
 });
 
+test("HN search URL disables Algolia typo tolerance", async () => {
+  const urls: string[] = [];
+  const source = hnSource(async input => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ page: 0, nbPages: 1, hits: [] }), { status: 200 });
+  });
+  const result = await source.fetch(query, null);
+  assert.equal(result.ok, true);
+  assert.match(urls[0], /[?&]typoTolerance=false(&|$)/);
+});
+
 test("HN searches each term separately instead of joining with OR", async () => {
   // The Algolia search_by_date endpoint has no OR operator: "Plow OR plow"
   // is parsed as three required words, which is why the real API returned

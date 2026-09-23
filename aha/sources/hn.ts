@@ -118,7 +118,7 @@ export function hnSource(http: typeof fetch = fetch): SourceAdapter {
       const until = Math.floor(query.until.getTime() / 1000);
       // The HN Algolia API has no OR operator: "a OR b" is searched as the literal
       // required words "a", "OR", "b". Each term gets its own request instead.
-      const url = `${HOST}?query=${encodeURIComponent(term)}&numericFilters=${encodeURIComponent(`created_at_i>${since},created_at_i<${until}`)}&hitsPerPage=50&page=${page}`;
+      const url = `${HOST}?query=${encodeURIComponent(term)}&numericFilters=${encodeURIComponent(`created_at_i>${since},created_at_i<${until}`)}&hitsPerPage=50&page=${page}&typoTolerance=false`;
       try {
         return await read(await http(url), boundedIndex, terms.length, page);
       } catch {
