@@ -22,8 +22,8 @@ COPY package.json package-lock.json tsconfig.json /opt/plow/
 # Root-owned, outside the state volume the agent writes: a copy the agent could
 # write is a copy a turn can replace.
 RUN curl -fsS --max-time 60 -o /opt/plow/agent-index-client.py \
-      "https://raw.githubusercontent.com/plow-pbc/agent-index-client/87901f8b182a8a7c65ee3dd7267f8f835ee2a545/standalone/agent_index_client.py" \
- && echo "c3bf54ed37aec22704b8003a7ff6385a1fd3ef49207ce55613ddc41df36a1b01  /opt/plow/agent-index-client.py" | sha256sum -c - \
+      "https://raw.githubusercontent.com/plow-pbc/agent-index-client/edf196031803e204cdbcd81ce574e1f54fd75f65/standalone/agent_index_client.py" \
+ && echo "970caf7534cd7d3b71ffee8f1a576f9da4dc494a508e8ab1998ee2ce6f4a2ac4  /opt/plow/agent-index-client.py" | sha256sum -c - \
  && chmod 0644 /opt/plow/agent-index-client.py
 
 # The collector the reporter reads. agentsview covers OpenClaw sessions, so with
