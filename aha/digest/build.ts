@@ -1,3 +1,4 @@
+import { detectTrends, type TrendAlert } from "../pipeline/trends.ts";
 import { type Store } from "../store/db.ts";
 
 export type Role = "founder" | "produto" | "marketing" | "engenharia";
@@ -24,6 +25,7 @@ export type DigestModel = {
   readCount: number;
   items: DigestItem[];
   sources: SourceHealth[];
+  trends: TrendAlert[];
 };
 
 const ROLE_CATEGORIES: Record<Role, string[]> = {
@@ -90,5 +92,5 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
     LEFT JOIN (SELECT source, MAX(window_end) AS since FROM source_runs WHERE status = 'ok' GROUP BY source) ok
       ON ok.source = r.source
     WHERE r.status != 'ok'`).all() as SourceHealth[];
-  return { day: ymd(until, tz), role, readCount, items: ranked, sources };
+  return { day: ymd(until, tz), role, readCount, items: ranked, sources, trends: detectTrends(s, until) };
 }
