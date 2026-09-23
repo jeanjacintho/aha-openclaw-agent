@@ -1,13 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { getConfig } from "./config.ts";
 import { classifyNewItems, deliverDigest } from "./digest/deliver.ts";
-import { draftAndNotify } from "./responder/drafts.ts";
+import { draftAndNotify, notifyExpiredDrafts } from "./responder/drafts.ts";
 import { runPromiseChecks } from "./promises/check.ts";
 import { ahaHome } from "./home.ts";
 import { runIngest } from "./pipeline/ingest.ts";
 import { schedule, type ScheduleHandle } from "./scheduler.ts";
 import { watchAdapters } from "./sources/watch.ts";
 import { openStore } from "./store/db.ts";
+import { pruneExpired } from "./store/retention.ts";
 
 export { ahaHome };
 
@@ -15,6 +16,8 @@ async function ingestThenClassify() {
   const store = openStore();
   try {
     await runIngest(store, watchAdapters(getConfig(store)), new Date());
+    const pruned = pruneExpired(store, new Date());
+    await notifyExpiredDrafts(store, pruned.expiredItemIds);
     await classifyNewItems(store);
     await draftAndNotify(store);
     await runPromiseChecks(store, new Date());

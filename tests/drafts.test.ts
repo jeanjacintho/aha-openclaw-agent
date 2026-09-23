@@ -111,6 +111,14 @@ test("the validator appends the AHA signature", () => {
   if (result.ok) assert.match(result.body, /— AHA, AI assistant of Plow/);
 });
 
+test("the validator refuses empty text before adding a signature", () => {
+  for (const text of ["", "   "]) {
+    const result = validateReply(text, { company: "Plow", lang: "en", url: null });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, "empty");
+  }
+});
+
 test("draftReply strips off-list links, signs the body, and stores a pending draft", async t => {
   const store = await home(t);
   const itemId = insertItem(store);

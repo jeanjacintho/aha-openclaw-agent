@@ -68,6 +68,7 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
     LEFT JOIN classifications ON classifications.item_id = items.id
     WHERE items.id = ?`).get(draft.itemId) as Row | undefined;
   if (!row || !cfg) return { allow: false, reasons: [POLICY.validator] };
+  if (draft.state !== "pending" || !draft.body.trim()) return { allow: false, reasons: [POLICY.validator] };
   const reasons: string[] = [];
   const names = [cfg.company.name, cfg.company.product, ...(cfg.company.aliases ?? [])].filter((name): name is string => typeof name === "string");
   const ask = row.is_question === 1 && (row.about ?? "self") === "self";
