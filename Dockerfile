@@ -4,6 +4,7 @@ LABEL org.opencontainers.image.revision=$PLOW_REVISION co.plow.probe=/opt/plow/p
 USER root
 RUN mkdir -p /opt/plow/skills /var/lib/plow && chown node:node /var/lib/plow
 COPY boot /opt/plow/boot
+COPY aha /opt/plow/aha
 COPY plugin /opt/plow/plugin
 COPY prompt /opt/plow/prompt
 COPY skills /opt/plow/skills
