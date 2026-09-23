@@ -1,7 +1,6 @@
 CREATE TABLE meta (
   schema_version INTEGER NOT NULL
 );
-INSERT INTO meta (schema_version) VALUES (1);
 
 CREATE TABLE config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -11,7 +10,8 @@ CREATE TABLE config (
 CREATE TABLE source_runs (
   id INTEGER PRIMARY KEY,
   source TEXT NOT NULL,
-  window TEXT NOT NULL,
+  window_start TEXT NOT NULL,
+  window_end TEXT NOT NULL,
   status TEXT NOT NULL,
   detail TEXT
 );
@@ -92,10 +92,12 @@ CREATE TABLE autonomy (
 );
 
 CREATE TABLE deliveries (
-  id INTEGER PRIMARY KEY,
-  item_id INTEGER NOT NULL REFERENCES items (id),
-  role TEXT NOT NULL,
-  delivered_at TEXT
+  key TEXT PRIMARY KEY,
+  chat_uid TEXT NOT NULL,
+  status TEXT NOT NULL,
+  message_uid TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE feedback_examples (
