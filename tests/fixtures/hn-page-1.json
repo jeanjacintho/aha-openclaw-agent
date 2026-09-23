@@ -1,0 +1,15 @@
+{
+  "page": 1,
+  "nbPages": 2,
+  "hitsPerPage": 50,
+  "hits": [
+    {
+      "objectID": "113",
+      "author": "cara",
+      "title": "Plow agent index",
+      "story_text": "Using plow to list agents.",
+      "created_at": "2026-09-22T14:00:00.000Z",
+      "created_at_i": 1758549600
+    }
+  ]
+}

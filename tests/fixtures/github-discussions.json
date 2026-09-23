@@ -1,0 +1,55 @@
+{
+  "data": {
+    "repository": {
+      "discussions": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "title": "agent:aha",
+            "url": "https://github.com/plow-pbc/agent-index-comments/discussions/1",
+            "createdAt": "2026-09-20T00:00:00.000Z",
+            "comments": {
+              "nodes": [
+                {
+                  "id": "D_1",
+                  "url": "https://github.com/plow-pbc/agent-index-comments/discussions/1#discussioncomment-1",
+                  "createdAt": "2026-09-22T10:00:00.000Z",
+                  "body": "The aha agent missed a mention.",
+                  "author": { "login": "nina" },
+                  "replies": {
+                    "nodes": [
+                      {
+                        "id": "D_1r",
+                        "url": "https://github.com/plow-pbc/agent-index-comments/discussions/1#discussioncomment-2",
+                        "createdAt": "2026-09-22T11:00:00.000Z",
+                        "body": "On it.",
+                        "author": { "login": "omar" }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "title": "agent:other",
+            "url": "https://github.com/plow-pbc/agent-index-comments/discussions/2",
+            "createdAt": "2026-09-22T10:00:00.000Z",
+            "comments": {
+              "nodes": [
+                {
+                  "id": "D_skip",
+                  "url": "https://github.com/plow-pbc/agent-index-comments/discussions/2#discussioncomment-9",
+                  "createdAt": "2026-09-22T10:30:00.000Z",
+                  "body": "Not our slug.",
+                  "author": { "login": "skip" },
+                  "replies": { "nodes": [] }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "page": 0,
+  "nbPages": 2,
+  "hitsPerPage": 50,
+  "hits": [
+    {
+      "objectID": "111",
+      "author": "alice",
+      "story_title": "Show HN: Plow queues",
+      "comment_text": "<p>We shipped this on <i>Plow</i>.<p>See 3&#x2F;4 in the <a href=\"https://example.com/x\" rel=\"nofollow\">docs</a>.",
+      "created_at": "2026-09-22T12:00:00.000Z",
+      "created_at_i": 1758542400,
+      "parent_id": 100,
+      "story_id": 100,
+      "story_url": "https://news.ycombinator.com/item?id=100"
+    },
+    {
+      "objectID": "112",
+      "author": "bob",
+      "title": "Snow plow season is here",
+      "story_text": "Need a snow plow for the driveway.",
+      "created_at": "2026-09-22T13:00:00.000Z",
+      "created_at_i": 1758546000,
+      "url": "https://example.com/snow"
+    }
+  ]
+}
