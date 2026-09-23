@@ -1,6 +1,7 @@
 import { getConfig } from "../config.ts";
 import { type Store } from "../store/db.ts";
 import { validateReply, type Draft } from "./drafts.ts";
+import { redditSubreddit } from "./post.ts";
 
 export type PolicyResult = { allow: true } | { allow: false; reasons: string[] };
 
@@ -76,7 +77,8 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
   if ((row.confidence ?? 0) < 0.8) reasons.push(POLICY.confidence);
   const day = ymd(now);
   const total = countLedger(store, `post:${day}:%`);
-  const community = countLedger(store, `post:${day}:${row.source}:%`);
+  const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
+  const community = countLedger(store, sub ? `post:${day}:reddit:${sub}:%` : `post:${day}:${row.source}:%`);
   if (total >= TOTAL_DAY || community >= COMMUNITY_DAY || threadTaken(store, row.source, row.external_id)) {
     reasons.push(POLICY.rateLimit);
   }
@@ -98,8 +100,10 @@ export function recordReady(store: Store, draft: Draft, now: Date) {
   } | undefined;
   if (!row) return;
   const day = ymd(now);
+  const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
+  const postKey = sub ? `post:${day}:reddit:${sub}:${row.external_id}` : `post:${day}:${row.source}:${row.external_id}`;
   store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO UPDATE SET state = 'ready', url = excluded.url")
-    .run(`post:${day}:${row.source}:${row.external_id}`, row.url);
+    .run(postKey, row.url);
   store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO UPDATE SET state = 'ready', url = excluded.url")
     .run(`thread:${row.source}:${row.external_id}`, row.url);
 }

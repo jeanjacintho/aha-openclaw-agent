@@ -8,6 +8,8 @@ import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
+import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
+import { postReply } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
@@ -548,9 +550,18 @@ export function registerAhaTools(api: {
         const claimed = store.db.prepare("UPDATE drafts SET state = 'approved' WHERE id = ? AND state = 'pending'").run(draft.id);
         if (claimed.changes !== 1) return fail("draft is not claimable");
         recordReady(store, draft, now);
+        const decision = recordDecision(store, draft, "approved");
+        if (decision.suggest) {
+          const cfg = getConfig(store);
+          const owner = cfg?.ownerChatUid;
+          if (owner) {
+            await sendToChat(owner, suggestText(decision.suggest.source, decision.suggest.category, cfg?.language || "pt"), `autonomy:${decision.suggest.source}:${decision.suggest.category}`, { store });
+          }
+        }
+        const item = store.db.prepare("SELECT url, source FROM items WHERE id = ?").get(draft.itemId) as { url: string | null; source: string };
+        if (item.source === "reddit") await postReply(store, draft.id);
         const chat = ctx.nativeChannelId;
         if (!chat) return fail("missing chat");
-        const item = store.db.prepare("SELECT url FROM items WHERE id = ?").get(draft.itemId) as { url: string | null };
         const text = `${draft.body}${item.url ? `\n${item.url}` : ""}`;
         const result = await sendToChat(chat, text, `approve:${draft.id}`, { store });
         return ok(digestSendReply(result));
@@ -599,6 +610,7 @@ export function registerAhaTools(api: {
         });
         if (!checked.ok) return fail(`draft failed validation: ${checked.reason}`);
         store.db.prepare("UPDATE drafts SET body = ? WHERE id = ?").run(checked.body, draft.id);
+        recordDecision(store, { ...draft, body: checked.body }, "edited");
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, edited: true });
       } finally {
         store.close();
@@ -633,6 +645,7 @@ export function registerAhaTools(api: {
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
         store.db.prepare("UPDATE drafts SET state = 'ignored' WHERE id = ? AND state = 'pending'").run(draft.id);
+        recordDecision(store, { ...draft, state: "ignored" }, "ignored");
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, ignored: true });
       } finally {
         store.close();
@@ -733,6 +746,36 @@ export function registerAhaTools(api: {
       try {
         store.db.prepare("UPDATE flags SET paused = 0 WHERE id = 1").run();
         return ok({ paused: false });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_autonomy_confirm",
+    label: "Confirm AHA L2 autonomy",
+    description: "Owner only. Promote a source×category to L2 after the agent suggested it. Never auto-promotes.",
+    parameters: {
+      type: "object",
+      required: ["source", "category"],
+      additionalProperties: false,
+      properties: {
+        source: { type: "string", minLength: 1 },
+        category: { type: "string", minLength: 1 },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const source = typeof args.source === "string" ? args.source.trim() : "";
+      const category = typeof args.category === "string" ? args.category.trim() : "";
+      if (!source || !category) return fail("source and category are required");
+      const store = openStore();
+      try {
+        const result = confirmAutonomy(store, source, category);
+        if (!result.ok) return fail(result.reason);
+        return ok({ source, category, level: result.level });
       } finally {
         store.close();
       }

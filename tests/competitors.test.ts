@@ -6,7 +6,7 @@ import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { buildDigest, competitorSummary, isCompetitionDigestDay } from "../aha/digest/build.ts";
 import { renderDigest } from "../aha/digest/render.ts";
-import { autonomyLevel } from "../aha/responder/autonomy.ts";
+import { itemAutonomy } from "../aha/responder/autonomy.ts";
 import { openStore } from "../aha/store/db.ts";
 
 async function home(t: import("node:test").TestContext) {
@@ -39,10 +39,11 @@ function classify(store: ReturnType<typeof openStore>, itemId: number, over: { c
 const monday = new Date("2026-09-28T20:00:00.000Z");
 const tuesday = new Date("2026-09-22T20:00:00.000Z");
 
-test("competitor about is always L0", () => {
-  assert.equal(autonomyLevel("competitor:zonk"), "L0");
-  assert.equal(autonomyLevel("self"), "L1");
-  assert.equal(autonomyLevel(null), "L1");
+test("competitor about is always L0", async t => {
+  const store = await home(t);
+  assert.equal(itemAutonomy(store, "competitor:zonk", "reddit", "question"), "L0");
+  assert.equal(itemAutonomy(store, "self", "reddit", "question"), "L1");
+  assert.equal(itemAutonomy(store, null, "reddit", "question"), "L1");
 });
 
 test("competition digest only renders on Monday", () => {

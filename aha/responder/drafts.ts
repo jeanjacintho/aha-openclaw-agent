@@ -4,7 +4,8 @@ import { draftSystemPrompt } from "../llm/prompts.ts";
 import { sendToChat, type SendDeps } from "../notify/plow.ts";
 import { routeItem, type Role } from "../pipeline/route.ts";
 import { type Store } from "../store/db.ts";
-import { autonomyLevel } from "./autonomy.ts";
+import { itemAutonomy } from "./autonomy.ts";
+import { postReply } from "./post.ts";
 
 export type Draft = {
   id: number;
@@ -166,7 +167,7 @@ export async function draftReply(store: Store, itemId: number, deps: DraftDeps =
   if (!cfg) throw new Error("setup is required");
   const item = loadItem(store, itemId);
   if (!item) throw new Error("item not found");
-  if (autonomyLevel(item.about) === "L0") throw new Error("competitor items do not get a draft");
+  if (itemAutonomy(store, item.about, item.source, item.category ?? "other") === "L0") throw new Error("competitor items do not get a draft");
   if (redLine(item.category, item.topic)) {
     store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(itemId);
     throw new Error("red-line items are escalated");
@@ -197,6 +198,7 @@ export async function draftReply(store: Store, itemId: number, deps: DraftDeps =
 
 type Draftable = {
   id: number;
+  source: string;
   fetchedAt: string | null;
   url: string | null;
   category: string | null;
@@ -243,7 +245,7 @@ function recordDraftFailure(store: Store, itemId: number, error: unknown) {
 export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
   const cfg = getConfig(store);
   const now = deps.now?.() ?? new Date();
-  const rows = store.db.prepare(`SELECT items.id, items.fetched_at AS fetchedAt, items.url, classifications.category, classifications.urgency, classifications.about, classifications.topic
+  const rows = store.db.prepare(`SELECT items.id, items.source, items.fetched_at AS fetchedAt, items.url, classifications.category, classifications.urgency, classifications.about, classifications.topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
     WHERE items.state IN ('relevant', 'assigned')
@@ -266,6 +268,10 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
     }
     try {
       const draft = await draftReply(store, row.id, deps);
+      if (itemAutonomy(store, row.about, row.source, row.category ?? "other") === "L2") {
+        const posted = await postReply(store, draft.id, { fetch: deps.fetch, now: deps.now });
+        if (posted === "posted") continue;
+      }
       const text = `Rascunho AHA-${row.id}\n${draft.body}${row.url ? `\n${row.url}` : ""}`;
       await notifyChats(store, cfg, roles.slice(0, 1), text, "draft", row.id, deps);
     } catch (error) {
