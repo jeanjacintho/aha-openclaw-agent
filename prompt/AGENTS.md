@@ -41,7 +41,11 @@ If the owner asks for Launch watch, run that same interview with sources
 Hacker News and Agent Index comments. Do not ask for an Agent Index slug:
 comments use `AGENT_ID` from the environment. Agent Index comments need a
 GitHub token set with `aha_secret_set` in the owner DM (`source` github).
-Without that token, only Hacker News is watched.
+Without that token, only Hacker News is watched. Product Hunt needs a
+developer token (`source` producthunt). GitHub issues/discussions of the
+product need `githubRepos` as `owner/name` in `aha_setup_save` plus that
+same GitHub token. Competitor mentions stay L0: watch only, never draft
+or post.
 
 Only the owner can save setup, set source tokens, or run a backfill. Call
 `aha_secret_set` only in the owner's DM; never repeat a token in a reply or

@@ -20,6 +20,17 @@ export type SourceHealth = {
   detail: string | null;
 };
 
+export type TopicCount = {
+  topic: string;
+  n: number;
+};
+
+export type CompetitorSummary = {
+  theyWin: TopicCount[];
+  theyComplain: TopicCount[];
+  weSolved: TopicCount[];
+};
+
 export type DigestModel = {
   day: string;
   role: Role;
@@ -27,6 +38,7 @@ export type DigestModel = {
   items: DigestItem[];
   sources: SourceHealth[];
   trends: TrendAlert[];
+  competitors?: CompetitorSummary;
 };
 
 const URGENCY_RANK: Record<string, number> = { high: 0, med: 1, low: 2 };
@@ -96,5 +108,63 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
     LEFT JOIN (SELECT source, MAX(window_end) AS since FROM source_runs WHERE status = 'ok' GROUP BY source) ok
       ON ok.source = r.source
     WHERE r.status != 'ok'`).all() as SourceHealth[];
-  return { day: ymd(until, tz), role, readCount, items: ranked, sources, trends: role === "founder" ? detectTrends(s, until) : [] };
+  return {
+    day: ymd(until, tz),
+    role,
+    readCount,
+    items: ranked,
+    sources,
+    trends: role === "founder" ? detectTrends(s, until) : [],
+    competitors: role === "founder" ? competitorSummary(s, until) : undefined,
+  };
+}
+
+const WEEK_MS = 7 * DAY_MS;
+
+function topicCounts(s: Store, sql: string, params: unknown[]) {
+  return (s.db.prepare(sql).all(...params) as TopicCount[]).map(row => ({ topic: row.topic, n: Number(row.n) }));
+}
+
+export function competitorSummary(s: Store, until: Date): CompetitorSummary {
+  const untilIso = until.toISOString();
+  const weekStart = new Date(until.getTime() - WEEK_MS).toISOString();
+  const theyWin = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('praise', 'comparison')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+    GROUP BY classifications.topic
+    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
+  const theyComplain = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('complaint', 'bug')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+    GROUP BY classifications.topic
+    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
+  const weSolved = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('complaint', 'bug')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+      AND (
+        EXISTS (
+          SELECT 1 FROM promises
+          WHERE promises.topic = classifications.topic AND promises.status = 'resolvida'
+        )
+        OR EXISTS (
+          SELECT 1 FROM classifications AS ours
+          JOIN items AS ours_items ON ours_items.id = ours.item_id
+          WHERE ours.topic = classifications.topic AND ours.about = 'self' AND ours.category = 'praise'
+        )
+      )
+    GROUP BY classifications.topic
+    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
+  return { theyWin, theyComplain, weSolved };
 }

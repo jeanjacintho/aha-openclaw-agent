@@ -1,0 +1,23 @@
+{
+  "data": {
+    "post": {
+      "id": "PH_ZONK",
+      "name": "Zonk",
+      "slug": "zonk",
+      "url": "https://www.producthunt.com/posts/zonk",
+      "comments": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "edges": [
+          {
+            "node": {
+              "id": "PHC_Z1",
+              "body": "Zonk onboarding is smoother than ours.",
+              "createdAt": "2026-09-22T11:00:00.000Z",
+              "user": { "username": "bea" }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

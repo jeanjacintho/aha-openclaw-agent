@@ -9,7 +9,13 @@ export type IngestReport = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function termsFrom(cfg: AhaConfig) {
-  const raw = [cfg.company.name, ...(cfg.company.aliases ?? []), cfg.company.domain].filter((value): value is string => Boolean(value && value.trim()));
+  const raw = [
+    cfg.company.name,
+    cfg.company.product,
+    ...(cfg.company.aliases ?? []),
+    cfg.company.domain,
+    ...(cfg.competitors ?? []),
+  ].filter((value): value is string => Boolean(value && value.trim()));
   const seen = new Set<string>();
   const result: string[] = [];
   for (const value of raw) {
@@ -30,10 +36,10 @@ export function passesFilter1(item: RawItem, cfg: AhaConfig) {
   const negative = (cfg.company.negative ?? []).map(word => word.toLowerCase());
   const passesNegative = !negative.some(word => word && hay.includes(word));
   // Agent Index comments already live inside an `agent:<slug>` discussion for
-  // this company, so they are on-topic by construction; only the negative
-  // word check still applies (spec §6.2 is about disambiguating a bare
-  // mention, which doesn't apply here).
-  if (item.source === "agent-index") return passesNegative;
+  // this company, and GitHub issues/discussions come from a configured product
+  // repo, so they are on-topic by construction; only the negative word check
+  // still applies (spec §6.2 is about disambiguating a bare mention).
+  if (item.source === "agent-index" || item.source === "github") return passesNegative;
   const aliases = termsFrom(cfg).map(term => term.toLowerCase());
   if (!aliases.some(term => hay.includes(term))) return false;
   return passesNegative;
