@@ -42,8 +42,8 @@ export function renderConfig(identity: Identity, apiBase: string) {
     commands: { ownerAllowFrom: ["plow-owner"] },
     memory: { search: { rememberAcrossConversations: false } },
     // An empty allowlist means unrestricted in OpenClaw.
-    skills: { load: { extraDirs: ["/opt/plow/skills"] }, allowBundled: ["plow-no-bundled-skills"] },
-    // Keep workspace and durable memory writes local instead of routing them through the Mac relay.
-    tools: { profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"], deny: ["ask_user"] },
+    skills: { load: { extraDirs: ["/opt/plow/skills/google-workspace"] }, allowBundled: ["plow-no-bundled-skills"] },
+    // Workspace file tools and Latch/exec stay off (spike S4).
+    tools: { profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "plow_start_thread"], deny: ["ask_user", "exec", "write", "edit"] },
   };
 }

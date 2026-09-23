@@ -81,12 +81,20 @@ test("MCP sessions share the loopback bridge and expire after five idle minutes"
 });
 
 test("phone turns cannot block on ask_user", () => {
-  assert.deepEqual(renderConfig(identity, "http://api:8000").tools.deny, ["ask_user"]);
+  assert.deepEqual(renderConfig(identity, "http://api:8000").tools.deny, ["ask_user", "exec", "write", "edit"]);
 });
 
-test("native messaging retains local workspace and memory file tools", () => {
-  assert.deepEqual(renderConfig(identity, "http://api:8000").tools, {
-    profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"], deny: ["ask_user"],
+test("configuration denies exec, write, edit, and Latch", () => {
+  const config = renderConfig({ ...identity, mcp_url: "http://api:8000/relay" }, "http://api:8000");
+  const blob = JSON.stringify(config).toLowerCase();
+  assert.equal(config.tools.alsoAllow.includes("exec"), false);
+  assert.equal(config.tools.alsoAllow.includes("write"), false);
+  assert.equal(config.tools.alsoAllow.includes("edit"), false);
+  for (const name of ["exec", "write", "edit"]) assert.equal(config.tools.deny.includes(name), true);
+  assert.equal(blob.includes("latch"), false);
+  assert.equal(blob.includes("owners-mac"), false);
+  assert.deepEqual(config.tools, {
+    profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "plow_start_thread"], deny: ["ask_user", "exec", "write", "edit"],
   });
 });
 

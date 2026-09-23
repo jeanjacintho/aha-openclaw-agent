@@ -18,7 +18,7 @@ for (const mode of ["full", "discovery", "tool-discovery"]) test(`${mode} expose
     registerTool(factory: (context: object) => { name: string }) { names.push(factory({}).name); },
     on(name: string) { hooks.push(name); },
   });
-  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_complaint", "aha_not_us", "aha_logs", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"]);
+  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_complaint", "aha_not_us", "aha_logs", "aha_forget", "aha_pause", "aha_resume", "aha_autonomy_confirm", "aha_promise_propose", "aha_promise_confirm", "aha_promises"]);
   const manifest = JSON.parse(await readFile(new URL("../plugin/openclaw.plugin.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.contracts.tools, names);
   assert.ok(!hooks.includes("before_tool_call"));

@@ -15,6 +15,7 @@ export type AhaConfig = {
   ownerChatUid?: string;
   agentIndexSlug?: string;
   roleChats?: Partial<Record<Role, string>>;
+  tokenBudget?: number;
 };
 
 function assertConfig(config: AhaConfig) {

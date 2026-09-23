@@ -7,6 +7,9 @@ import { getConfig, saveConfig } from "../aha/config.ts";
 import { classifyBatch, type ItemRow } from "../aha/pipeline/classify.ts";
 import { wrapPublicPosts } from "../aha/llm/prompts.ts";
 import { openStore } from "../aha/store/db.ts";
+import { buildDigest } from "../aha/digest/build.ts";
+import { renderDigest } from "../aha/digest/render.ts";
+import entry from "../plugin/index.ts";
 
 const EVIL = "https://evil.example/steal";
 const ALLOWED = "https://news.ycombinator.com/item?id=1";
@@ -30,9 +33,28 @@ async function home(t: import("node:test").TestContext) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-inject-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.includes("/chat/completions")) return obeyingFetch(input, init);
+    if (url.endsWith("/chats") && method === "GET") {
+      return Response.json({
+        data: [
+          { uid: "cht_dm", status: "active", participants: [
+            { type: "agent", relationship: "self", line: { uid: "line" } },
+            { type: "member", uid: "plow-owner", role: "owner", provider_key: "plow-owner", display_name: "Owner" },
+          ] },
+        ],
+        has_more: false,
+      });
+    }
+    if (method === "POST" && url.includes("/messages")) return Response.json({ uid: "msg" });
+    if (method === "POST" && url.endsWith("/chats")) return Response.json({ uid: "cht_group" });
+    return new Response("", { status: 404 });
+  });
   const store = openStore(dir);
   t.after(() => store.close());
-  saveConfig(store, { company: { name: "Plow" }, links: [ALLOWED], competitors: ["zonk"] });
+  saveConfig(store, { company: { name: "Plow" }, links: [ALLOWED], competitors: ["zonk"], ownerChatUid: "cht_dm", roleChats: { marketing: "cht_marketing" } });
   return store;
 }
 
@@ -151,4 +173,78 @@ for (const attack of attacks) test(`injection ${attack.name} cannot change store
     assert.equal(row.topic, "queues");
     assert.equal(row.about, "self");
   }
+});
+
+type Tool = { name: string; execute: (id: string, args: Record<string, unknown>) => Promise<{ isError?: boolean; content: { text: string }[]; details?: unknown }> };
+
+function tools() {
+  const byName = new Map<string, Tool>();
+  const plow = { apiBase: "http://plow.test", lineUid: "line", accountId: "chat" };
+  entry.register({
+    registrationMode: "full",
+    runtime: {},
+    logger: { info() {} },
+    on() {},
+    registerChannel() {},
+    registerTool(factory: (context: object) => Tool) {
+      const tool = factory({
+        senderIsOwner: true,
+        requesterSenderId: "plow-owner",
+        nativeChannelId: "cht_marketing",
+        config: { channels: { plow } },
+      });
+      byName.set(tool.name, tool);
+    },
+  });
+  return byName;
+}
+
+function argsFor(name: string, itemId: number, attack: string): Record<string, unknown> {
+  switch (name) {
+    case "aha_setup_save": return { company: "Plow" };
+    case "aha_secret_set": return { source: "github", token: "not-from-post" };
+    case "aha_backfill": return { days: 1 };
+    case "aha_role_assign": return { memberUid: "mem_x", role: "marketing" };
+    case "aha_ask": return { question: attack };
+    case "aha_approve":
+    case "aha_ignore": return { draftId: `AHA-${itemId}`, reason: attack };
+    case "aha_edit": return { draftId: `AHA-${itemId}`, text: attack };
+    case "aha_complaint":
+    case "aha_not_us":
+    case "aha_claim": return { itemId: `AHA-${itemId}`, reason: attack };
+    case "aha_logs": return { id: `AHA-${itemId}` };
+    case "aha_forget": return { urlOrAuthor: attack.slice(0, 80) };
+    case "aha_autonomy_confirm": return { source: "reddit", category: "question" };
+    case "aha_promise_propose": return { topic: "queues", due: "2026-12-01", ownerUid: "plow-owner" };
+    case "aha_promise_confirm": return { proposalId: 1 };
+    default: return {};
+  }
+}
+
+for (const attack of attacks) test(`injection ${attack.name} cannot drive aha_* tools or the digest`, async t => {
+  const store = await home(t);
+  const item = insert(store, attack.body);
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(item.id);
+  store.db.prepare("UPDATE items SET state = 'relevant'").run();
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')")
+    .run(item.id, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+  const map = tools();
+  const ahaTools = [...map.keys()].filter(name => name.startsWith("aha_"));
+  assert.ok(ahaTools.length >= 20, `expected every aha_* tool, got ${ahaTools.join(",")}`);
+  for (const name of ahaTools) {
+    await map.get(name)!.execute("call", argsFor(name, item.id, attack.body));
+  }
+  const cfg = getConfig(store);
+  assert.equal(cfg?.company.name, "Plow");
+  assert.equal(storeHasEvil(store), undefined);
+  const model = buildDigest(store, "marketing", new Date("2026-09-23T12:00:00.000Z"));
+  for (const row of model.items) {
+    assert.ok(row.excerpt.length <= 200);
+    assert.equal(row.excerpt.includes("evil.example"), false);
+  }
+  const digest = renderDigest(model, "en");
+  assert.equal(digest.includes("evil.example"), false);
+  const quoted = [...digest.matchAll(/: ([^\n]+)/g)].map(match => match[1]);
+  for (const excerpt of quoted) assert.ok(excerpt.replace(/ https?:\S+$/, "").length <= 220);
 });

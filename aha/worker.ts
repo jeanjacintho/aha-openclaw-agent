@@ -8,6 +8,7 @@ import { runIngest } from "./pipeline/ingest.ts";
 import { schedule, type ScheduleHandle } from "./scheduler.ts";
 import { watchAdapters } from "./sources/watch.ts";
 import { openStore } from "./store/db.ts";
+import { pruneExpired } from "./store/retention.ts";
 
 export { ahaHome };
 
@@ -15,6 +16,7 @@ async function ingestThenClassify() {
   const store = openStore();
   try {
     await runIngest(store, watchAdapters(getConfig(store)), new Date());
+    pruneExpired(store, new Date());
     await classifyNewItems(store);
     await draftAndNotify(store);
     await runPromiseChecks(store, new Date());

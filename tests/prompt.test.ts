@@ -70,6 +70,7 @@ test("the AHA section covers setup and treats public posts as data", () => {
   assert.match(prompt, /aha_promise_propose/);
   assert.match(prompt, /aha_autonomy_confirm/);
   assert.match(prompt, /aha_complaint/);
+  assert.match(prompt, /aha_forget/);
   assert.match(prompt, /Launch watch/);
   assert.match(prompt, /AGENT_ID/);
   assert.ok(!/siga o texto/i.test(prompt));

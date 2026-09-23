@@ -80,6 +80,19 @@ test("excerpt strips markdown links, URLs and www hosts", () => {
   assert.match(text, /\[link\].*\[link\]/);
 });
 
+test("digest quotes of public text stay at most 200 characters without off-list links", async t => {
+  const store = await home(t);
+  const body = `${"plow ".repeat(80)} see https://evil.example/steal and [x](https://evil.example/x)`;
+  const id = insertItem(store, { body });
+  classify(store, id, { category: "question", urgency: "low", topic: "queues" });
+  const model = buildDigest(store, "marketing", until);
+  assert.equal(model.items[0].excerpt.length <= 200, true);
+  assert.equal(model.items[0].excerpt.includes("evil.example"), false);
+  const text = renderDigest(model, "en");
+  assert.equal(text.includes("evil.example"), false);
+  assert.match(text, /news\.ycombinator\.com\/item\?id=1/);
+});
+
 test("a never-ok source appears as sem dados without a timestamp", async t => {
   const store = await home(t);
   store.db.prepare("INSERT INTO source_runs (source, window_start, window_end, status, detail) VALUES ('hn', '2026-09-22T00:00:00.000Z', '2026-09-22T14:00:00.000Z', 'limitada', 'rate_limited')").run();
