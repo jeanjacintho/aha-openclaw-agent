@@ -3,12 +3,20 @@ import { classifyBatch, type ClassifyDeps, type ItemRow } from "../pipeline/clas
 import { ROLES, type Role } from "../pipeline/route.ts";
 import { sendToChat, type SendDeps, type SendResult } from "../notify/plow.ts";
 import { type Store } from "../store/db.ts";
+import { classifyAllowed, warnBudgetIfNeeded } from "../usage/budget.ts";
 import { buildDigest } from "./build.ts";
 import { renderDigest } from "./render.ts";
 
-export async function classifyNewItems(store: Store, deps?: ClassifyDeps) {
+export async function classifyNewItems(store: Store, deps?: ClassifyDeps & SendDeps) {
+  const now = deps?.now?.() ?? new Date();
+  await warnBudgetIfNeeded(store, deps);
+  if (!classifyAllowed(store, now)) return;
   const items = store.db.prepare("SELECT * FROM items WHERE state = 'new' ORDER BY id").all() as ItemRow[];
-  for (let i = 0; i < items.length; i += 20) await classifyBatch(store, items.slice(i, i + 20), deps);
+  for (let i = 0; i < items.length; i += 20) {
+    if (!classifyAllowed(store, now)) return;
+    await classifyBatch(store, items.slice(i, i + 20), deps);
+    await warnBudgetIfNeeded(store, deps);
+  }
 }
 
 export function scheduledDigestKey(day: string, role: Role = "founder", chatUid?: string) {

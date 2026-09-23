@@ -7,6 +7,7 @@ import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
+import { ForgetError, forgetByUrlOrAuthor } from "../aha/store/retention.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
 import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
 import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
@@ -742,6 +743,36 @@ export function registerAhaTools(api: {
         const ident = store.db.prepare("SELECT source, external_id, url FROM items WHERE id = ?").get(itemId) as { source: string; external_id: string; url: string | null };
         const ledger = store.db.prepare("SELECT key, state, url FROM ledger WHERE key LIKE ? OR key = ?").all(`post:%:${ident.source}:${ident.external_id}`, threadLedgerKey(ident.source, ident.external_id, ident.url));
         return ok({ publicId: `AHA-${itemId}`, item, classification, drafts, feedback, ledger });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_forget",
+    label: "Forget an AHA post or author",
+    description: "Owner only. Delete stored items matching a URL or source:handle (e.g. hn:alice).",
+    parameters: {
+      type: "object",
+      required: ["urlOrAuthor"],
+      additionalProperties: false,
+      properties: { urlOrAuthor: { type: "string", minLength: 1 } },
+    },
+    async execute(_id, args) {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const urlOrAuthor = typeof args.urlOrAuthor === "string" ? args.urlOrAuthor.trim() : "";
+      if (!urlOrAuthor) return fail("urlOrAuthor is required");
+      const store = openStore();
+      try {
+        const deleted = forgetByUrlOrAuthor(store, urlOrAuthor, {
+          actor: ctx.requesterSenderId || "owner",
+        });
+        return ok({ deleted });
+      } catch (error) {
+        if (error instanceof ForgetError) return fail(error.message);
+        throw error;
       } finally {
         store.close();
       }

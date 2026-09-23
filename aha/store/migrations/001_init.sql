@@ -55,6 +55,7 @@ CREATE TABLE topic_weekly (
   PRIMARY KEY (topic_id, iso_week)
 );
 
+-- Unused: reserved for per-source author handles; no reader or writer yet.
 CREATE TABLE authors (
   id INTEGER PRIMARY KEY,
   source TEXT NOT NULL,
