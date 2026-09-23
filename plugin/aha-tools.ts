@@ -9,6 +9,7 @@ import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
+import { parseDue } from "../aha/promises/check.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
@@ -730,6 +731,98 @@ export function registerAhaTools(api: {
       try {
         store.db.prepare("UPDATE flags SET paused = 0 WHERE id = 1").run();
         return ok({ paused: false });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_promise_propose",
+    label: "Propose an AHA promise",
+    description: "Propose a topic/due/owner promise. Does not write the promise until aha_promise_confirm. Any member.",
+    parameters: {
+      type: "object",
+      required: ["topic", "due", "ownerUid"],
+      additionalProperties: false,
+      properties: {
+        topic: { type: "string", minLength: 1 },
+        due: { type: "string", minLength: 1 },
+        ownerUid: { type: "string", minLength: 1 },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const topic = typeof args.topic === "string" ? args.topic.trim() : "";
+      const dueRaw = typeof args.due === "string" ? args.due.trim() : "";
+      const ownerUid = typeof args.ownerUid === "string" ? args.ownerUid.trim() : "";
+      if (!topic) return fail("topic is required");
+      if (!ownerUid) return fail("ownerUid is required");
+      let due: string;
+      try {
+        due = parseDue(dueRaw).toISOString().slice(0, 10);
+      } catch {
+        return fail("due must be a date");
+      }
+      const store = openStore();
+      try {
+        const at = new Date().toISOString();
+        const inserted = store.db.prepare("INSERT INTO promise_proposals (topic, due, owner, proposed_by, created_at) VALUES (?, ?, ?, ?, ?)")
+          .run(topic, due, ownerUid, ctx.requesterSenderId, at);
+        const proposalId = Number(inserted.lastInsertRowid);
+        const confirmText = `Registrado: ${topic}, prazo ${due}, dono ${ownerUid}. Certo? Confirme com aha_promise_confirm({proposalId:${proposalId}}).`;
+        return ok({ proposalId, confirmText, topic, due, ownerUid });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_promise_confirm",
+    label: "Confirm an AHA promise",
+    description: "Write a proposed promise. The promise ownerUid or the company owner, from host context.",
+    parameters: {
+      type: "object",
+      required: ["proposalId"],
+      additionalProperties: false,
+      properties: { proposalId: { type: ["integer", "string"] } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const proposalId = publicId(args.proposalId) ?? (typeof args.proposalId === "number" ? args.proposalId : Number(args.proposalId));
+      if (!Number.isInteger(proposalId) || proposalId < 1) return fail("proposalId is required");
+      const store = openStore();
+      try {
+        const proposal = store.db.prepare("SELECT id, topic, due, owner FROM promise_proposals WHERE id = ?").get(proposalId) as {
+          id: number; topic: string; due: string; owner: string;
+        } | undefined;
+        if (!proposal) return fail("proposal not found");
+        if (ctx.senderIsOwner !== true && ctx.requesterSenderId !== proposal.owner) return fail("only the promise owner or the company owner can confirm");
+        const inserted = store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES (?, ?, ?, 'open')")
+          .run(proposal.topic, proposal.due, proposal.owner);
+        store.db.prepare("DELETE FROM promise_proposals WHERE id = ?").run(proposal.id);
+        return ok({ promiseId: Number(inserted.lastInsertRowid), topic: proposal.topic, due: proposal.due, owner: proposal.owner, status: "open" });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_promises",
+    label: "List AHA promises",
+    description: "List confirmed promises (id, topic, due, owner, status). Any member.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const store = openStore();
+      try {
+        const promises = store.db.prepare("SELECT id, topic, due, owner, status FROM promises ORDER BY id").all();
+        return ok({ promises });
       } finally {
         store.close();
       }
