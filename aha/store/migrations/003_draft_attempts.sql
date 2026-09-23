@@ -1,0 +1,2 @@
+ALTER TABLE items ADD COLUMN draft_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN draft_error TEXT;

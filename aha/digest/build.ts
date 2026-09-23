@@ -60,7 +60,7 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
       classifications.category, classifications.urgency, classifications.topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.state = 'relevant' AND items.fetched_at <= ? AND items.fetched_at > ?`).all(
+    WHERE items.state IN ('relevant', 'escalated') AND items.fetched_at <= ? AND items.fetched_at > ?`).all(
     untilIso, role === "founder" ? staleStart : dayStart,
   ) as {
     id: number; body: string | null; url: string | null; state: string; fetched_at: string | null;

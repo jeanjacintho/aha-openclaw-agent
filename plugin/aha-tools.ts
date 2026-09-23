@@ -131,7 +131,7 @@ function sliceItems(store: Store, role: Role) {
   const rows = store.db.prepare(`SELECT items.id, items.state, classifications.category, classifications.urgency
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.state IN ('relevant', 'assigned')
+    WHERE items.state IN ('relevant', 'assigned', 'escalated')
     ORDER BY items.id`).all() as {
     id: number; state: string; category: string | null; urgency: string | null;
   }[];
@@ -148,6 +148,7 @@ function sliceItems(store: Store, role: Role) {
     counts: {
       relevant: items.filter(item => item.state === "relevant").length,
       assigned: items.filter(item => item.state === "assigned").length,
+      escalated: items.filter(item => item.state === "escalated").length,
     },
   };
 }

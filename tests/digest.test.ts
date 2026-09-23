@@ -106,3 +106,13 @@ test("digest bullets include the item id for claims", async t => {
   const text = renderDigest(buildDigest(store, "founder", until), "pt");
   assert.match(text, new RegExp(`\\[AHA-${id}\\]`));
 });
+
+test("an escalated red-line item still appears in the routed digest", async t => {
+  const store = await home(t);
+  const id = insertItem(store, { state: "escalated", body: "security report" });
+  classify(store, id, { category: "security", urgency: "high", topic: "auth" });
+  const engenharia = buildDigest(store, "engenharia", until);
+  assert.equal(engenharia.items.some(item => item.id === id), true);
+  const marketing = buildDigest(store, "marketing", until);
+  assert.equal(marketing.items.some(item => item.id === id), false);
+});

@@ -2,7 +2,7 @@ import { getConfig } from "../config.ts";
 import { complete, type CompleteDeps } from "../llm/client.ts";
 import { draftSystemPrompt } from "../llm/prompts.ts";
 import { sendToChat, type SendDeps } from "../notify/plow.ts";
-import { routeItem } from "../pipeline/route.ts";
+import { routeItem, type Role } from "../pipeline/route.ts";
 import { type Store } from "../store/db.ts";
 
 export type Draft = {
@@ -17,10 +17,16 @@ export type DraftDeps = CompleteDeps & SendDeps & {
 };
 
 const MAX_BODY = 500;
+const MAX_DRAFT_ATTEMPTS = 3;
+const MAX_DRAFT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PROMISE = /(?:\$|R\$|€|£)\s*\d|\d+\s*%|\b(?:off|desconto|discount|guaranteed|garantido)\b|\b(?:within|in|em)\s+\d+\s*(?:day|days|dias|week|weeks|semanas|hour|hours|horas)\b|\b(?:next week|semana que vem|tomorrow|amanh[aã]|by friday|at[eé] sexta)\b|\bper month\b|\bprazo\b|\brefund\b|\breembolso\b|\bwe will (?:ship|deliver)\b/i;
 const PT_MARK = /[áàâãéêíóôõúç]|você|não|obrigad/i;
 const EN_MARK = /\b(we are|thanks for|please |the |this )\b/i;
 const BARE_HOST = /(?:^|[\s(\[])((?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)\]]*)?)/gi;
+const COMMON_TLDS = new Set([
+  "com", "org", "net", "edu", "gov", "io", "co", "app", "dev", "ai", "info", "biz", "us", "uk", "br", "de", "fr",
+  "au", "ca", "in", "jp", "me", "gg", "tv", "cc", "xyz", "example", "test",
+]);
 
 export type ValidateResult = { ok: true; body: string } | { ok: false; reason: string };
 
@@ -97,11 +103,21 @@ function httpUrls(text: string) {
   return [...text.matchAll(/https?:\/\/[^\s)]+/gi)].map(match => match[0]);
 }
 
+export function isBareHost(token: string) {
+  const value = token.trim();
+  if (!value || /^https?:\/\//i.test(value)) return false;
+  if (/^www\./i.test(value)) return true;
+  if (value.includes("/")) return true;
+  const labels = value.split(".");
+  if (labels.length < 2) return false;
+  return COMMON_TLDS.has(labels[labels.length - 1].toLowerCase());
+}
+
 function bareHosts(text: string) {
   const found: string[] = [];
   for (const match of text.matchAll(BARE_HOST)) {
     const token = match[1];
-    if (!token || /^https?:\/\//i.test(token)) continue;
+    if (!token || !isBareHost(token)) continue;
     found.push(token);
   }
   return found;
@@ -110,7 +126,7 @@ function bareHosts(text: string) {
 export function stripOffListLinks(text: string, allowed: string[]) {
   let out = text.replace(/\[([^\]]*)\]\(([^)]+)\)/g, (full, label, href) => keepLink(String(href), allowed) ? full : String(label));
   out = out.replace(/https?:\/\/[^\s)]+/gi, url => keepLink(url, allowed) ? url : "");
-  out = out.replace(BARE_HOST, (full, host) => /^https?:\/\//i.test(host) ? full : full.replace(host, ""));
+  out = out.replace(BARE_HOST, (full, host) => isBareHost(String(host)) ? full.replace(host, "") : full);
   return out.replace(/[ \t]+\n/g, "\n").replace(/  +/g, " ").trim();
 }
 
@@ -178,33 +194,81 @@ export async function draftReply(store: Store, itemId: number, deps: DraftDeps =
   };
 }
 
-type Draftable = { id: number; category: string | null; urgency: string | null; about: string | null; topic: string | null };
+type Draftable = {
+  id: number;
+  fetchedAt: string | null;
+  url: string | null;
+  category: string | null;
+  urgency: string | null;
+  about: string | null;
+  topic: string | null;
+};
+
+function tooOld(fetchedAt: string | null, now: Date) {
+  if (!fetchedAt) return true;
+  const at = Date.parse(fetchedAt);
+  if (Number.isNaN(at)) return true;
+  return now.getTime() - at > MAX_DRAFT_AGE_MS;
+}
+
+async function notifyChats(
+  store: Store,
+  cfg: ReturnType<typeof getConfig>,
+  roles: string[],
+  text: string,
+  keyPrefix: string,
+  itemId: number,
+  deps: DraftDeps,
+) {
+  const fallback = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
+  const targets = (roles.length ? roles : ["founder"]).map(role => ({
+    role,
+    chat: cfg?.roleChats?.[role as Role] || fallback,
+  }));
+  const seen = new Set<string>();
+  for (const target of targets) {
+    if (!target.chat || seen.has(target.chat)) continue;
+    seen.add(target.chat);
+    await sendToChat(target.chat, text, `${keyPrefix}:${itemId}:${target.role}`, { store, fetch: deps.fetch, now: deps.now });
+  }
+}
+
+function recordDraftFailure(store: Store, itemId: number, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  store.db.prepare("UPDATE items SET draft_attempts = draft_attempts + 1, draft_error = ? WHERE id = ?")
+    .run(message.slice(0, 200), itemId);
+}
 
 export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
   const cfg = getConfig(store);
-  const rows = store.db.prepare(`SELECT items.id, classifications.category, classifications.urgency, classifications.about, classifications.topic
+  const now = deps.now?.() ?? new Date();
+  const rows = store.db.prepare(`SELECT items.id, items.fetched_at AS fetchedAt, items.url, classifications.category, classifications.urgency, classifications.about, classifications.topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
     WHERE items.state IN ('relevant', 'assigned')
       AND (classifications.about IS NULL OR classifications.about NOT LIKE 'competitor:%')
-      AND items.id NOT IN (SELECT item_id FROM drafts WHERE state IN ('pending', 'approved'))
-    ORDER BY items.id`).all() as Draftable[];
+      AND items.draft_attempts < ?
+      AND items.id NOT IN (SELECT item_id FROM drafts WHERE state IN ('pending', 'approved', 'ignored'))
+    ORDER BY items.id`).all(MAX_DRAFT_ATTEMPTS) as Draftable[];
   for (const row of rows) {
+    if (tooOld(row.fetchedAt, now)) {
+      store.db.prepare("UPDATE items SET draft_attempts = ?, draft_error = ? WHERE id = ?")
+        .run(MAX_DRAFT_ATTEMPTS, "item too old to draft", row.id);
+      continue;
+    }
+    const roles = routeItem({ category: row.category ?? "other", urgency: row.urgency });
     if (redLine(row.category, row.topic)) {
-      store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(row.id);
+      store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ? AND state IN ('relevant', 'assigned')").run(row.id);
+      const text = `Escalado AHA-${row.id} (${row.category ?? "red-line"})${row.url ? `\n${row.url}` : ""}`;
+      await notifyChats(store, cfg, roles.length ? roles : ["founder"], text, "escalate", row.id, deps);
       continue;
     }
     try {
       const draft = await draftReply(store, row.id, deps);
-      const roles = routeItem({ category: row.category ?? "other", urgency: row.urgency });
-      const role = roles[0] ?? "founder";
-      const chat = cfg?.roleChats?.[role] || cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
-      if (!chat) continue;
-      const url = (store.db.prepare("SELECT url FROM items WHERE id = ?").get(row.id) as { url: string | null }).url;
-      const text = `Rascunho AHA-${row.id}\n${draft.body}${url ? `\n${url}` : ""}`;
-      await sendToChat(chat, text, `draft:${row.id}`, { store, fetch: deps.fetch, now: deps.now });
-    } catch {
-      /* leave the item for a later cycle */
+      const text = `Rascunho AHA-${row.id}\n${draft.body}${row.url ? `\n${row.url}` : ""}`;
+      await notifyChats(store, cfg, roles.slice(0, 1), text, "draft", row.id, deps);
+    } catch (error) {
+      recordDraftFailure(store, row.id, error);
     }
   }
 }
