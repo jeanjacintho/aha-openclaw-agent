@@ -4,7 +4,8 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { dailyTotals, recordUsage, type UsageCall } from "../aha/usage/ledger.ts";
+import { exportLedger } from "../aha/usage/ledger-export.ts";
+import { dailyTotals, listUsage, recordUsage, type UsageCall } from "../aha/usage/ledger.ts";
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -28,6 +29,18 @@ test("three calls on two days sum, and a new process reads the same file", async
   assert.deepEqual(dailyTotals("2026-09-22"), firstDay);
   assert.deepEqual(dailyTotals("2026-09-23"), secondDay);
   assert.equal((await fs.readFile(path.join(home, "usage.jsonl"), "utf8")).trim().split("\n").length, 3);
+  const ids = listUsage().map(row => row.id);
+  assert.equal(new Set(ids).size, 3);
+  for (const id of ids) assert.match(id, /^[0-9a-f-]{36}$/);
+  const out = await fs.mkdtemp(path.join(os.tmpdir(), "aha-ledger-out-"));
+  t.after(() => fs.rm(out, { recursive: true, force: true }));
+  assert.equal(exportLedger(out).added, 3);
+  assert.equal(exportLedger(out).added, 0);
+  const exported = (await fs.readFile(path.join(out, "aha-worker", "sessions", "a7a00000-0000-4000-8000-000000000001.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(exported[0].type, "session");
+  assert.deepEqual(exported.slice(1).map(line => line.id), ids);
+  assert.equal(exported[1].message.provider, "plow");
+  assert.deepEqual(exported[1].message.usage, { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11 });
   const ledger = new URL("../aha/usage/ledger.ts", import.meta.url);
   const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `import { dailyTotals } from ${JSON.stringify(ledger.href)}; process.stdout.write(JSON.stringify({ a: dailyTotals("2026-09-22"), b: dailyTotals("2026-09-23") }));`], {
     env: { ...process.env, AHA_HOME: home }, encoding: "utf8",
