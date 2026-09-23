@@ -97,6 +97,19 @@ test("a failed sync still reports", async t => {
   assert.deepEqual(argv(calls), [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
 });
 
+test("the client is told where OpenClaw's store is", async t => {
+  env(t, { AGENT_ID: "my-agent", PLOW_API_BASE: "https://api.example" });
+  const state = await stateDir(t);
+  const calls = fakeClient(t, [0, 0, 0]);
+  startAgentIndex(300_000, state)?.close?.();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  // Without it the client reads $HOME/.openclaw, which nothing writes here,
+  // and reports a day of zeros without calling it a failure.
+  for (const call of calls.filter(c => c.command === "python3")) {
+    assert.equal(call.env.OPENCLAW_STATE_DIR, state);
+  }
+});
+
 test("an unreadable OpenClaw store is the client's to report, and the pass still runs", async t => {
   // Boot no longer reads that store: the client does, and it records the read
   // failure itself so a partial report never replaces a complete one.

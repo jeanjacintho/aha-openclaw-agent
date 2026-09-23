@@ -34,7 +34,12 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
     child.on("close", code => resolve(code ?? 1));
   });
   const python = (args: string[], token?: string) => run("python3", [CLIENT, ...args], {
-    PATH: process.env.PATH!, HOME: "/var/lib/plow", AGENT_ID: agent, PLOW_API_BASE: process.env.PLOW_API_BASE!, ...(token ? { PLOW_AGENT_TOKEN: token } : {}),
+    // OPENCLAW_STATE_DIR names the store the client reads. This env is built
+    // rather than inherited, so without it the client falls back to
+    // $HOME/.openclaw -- a path nothing writes here, and one it is right to
+    // pass over in silence, which is a day of zeros rather than an error.
+    PATH: process.env.PATH!, HOME: "/var/lib/plow", OPENCLAW_STATE_DIR: state,
+    AGENT_ID: agent, PLOW_API_BASE: process.env.PLOW_API_BASE!, ...(token ? { PLOW_AGENT_TOKEN: token } : {}),
   });
   const pass = async () => {
     const root = `${state}/.openclaw/agents`;
