@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { exportLedger } from "../aha/usage/ledger-export.ts";
-import { exportOpenClawSessions } from "../aha/usage/openclaw-export.ts";
 
 const CLIENT = "/opt/plow/agent-index-client.py";
 
@@ -8,7 +7,8 @@ const CLIENT = "/opt/plow/agent-index-client.py";
 // five minutes, the contract the Hermes base runs as an s6 service. This image
 // has no supervision tree of its own, so the boot process owns the schedule.
 //
-// Usage comes from agentsview, which reads ~/.openclaw/agents/<agent>/sessions/*.jsonl.
+// OpenClaw's own transcripts come from the client, which reads its SQLite
+// store directly; agentsview still covers the worker ledger exported below.
 // OpenClaw 2026.9.4 stores transcripts in SQLite, so each pass exports that
 // database (and the worker ledger) into those files and syncs before it reports.
 // HOME stays /var/lib/plow: the install key lives under $HOME/.agent-index, and
@@ -38,12 +38,6 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
   });
   const pass = async () => {
     const root = `${state}/.openclaw/agents`;
-    try {
-      const exported = exportOpenClawSessions(state, root);
-      if (exported.errors.length) console.error(`agent-index: ${exported.errors.join("; ")}`);
-    } catch (error) {
-      console.error(`agent-index: ${error instanceof Error ? error.message : String(error)}`);
-    }
     try {
       exportLedger(root);
     } catch (error) {
