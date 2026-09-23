@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { getConfig } from "./config.ts";
 import { classifyNewItems, deliverDigest } from "./digest/deliver.ts";
+import { draftAndNotify } from "./responder/drafts.ts";
 import { ahaHome } from "./home.ts";
 import { runIngest } from "./pipeline/ingest.ts";
 import { schedule, type ScheduleHandle } from "./scheduler.ts";
@@ -14,6 +15,7 @@ async function ingestThenClassify() {
   try {
     await runIngest(store, watchAdapters(getConfig(store)), new Date());
     await classifyNewItems(store);
+    await draftAndNotify(store);
   } finally {
     store.close();
   }

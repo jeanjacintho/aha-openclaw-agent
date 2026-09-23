@@ -1,11 +1,14 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
 import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deliver.ts";
+import { sendToChat } from "../aha/notify/plow.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
+import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
+import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
@@ -128,7 +131,7 @@ function sliceItems(store: Store, role: Role) {
   const rows = store.db.prepare(`SELECT items.id, items.state, classifications.category, classifications.urgency
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.state IN ('relevant', 'assigned')
+    WHERE items.state IN ('relevant', 'assigned', 'escalated')
     ORDER BY items.id`).all() as {
     id: number; state: string; category: string | null; urgency: string | null;
   }[];
@@ -145,6 +148,7 @@ function sliceItems(store: Store, role: Role) {
     counts: {
       relevant: items.filter(item => item.state === "relevant").length,
       assigned: items.filter(item => item.state === "assigned").length,
+      escalated: items.filter(item => item.state === "escalated").length,
     },
   };
 }
@@ -172,6 +176,27 @@ function claimRoles(store: Store, ctx: Requester): Role[] {
   const mine = ctx.requesterSenderId ? memberRoles(store, ctx.requesterSenderId) : [];
   if (ctx.senderIsOwner) return [...ROLES];
   return mine;
+}
+
+function publicId(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string") {
+    const match = value.trim().match(/^(?:AHA-)?(\d+)$/i);
+    if (match) return Number(match[1]);
+  }
+}
+
+function canActOnItem(store: Store, ctx: Requester, itemId: number) {
+  const row = itemClassification(store, itemId);
+  if (!row?.category) return fail("item not found");
+  if (ctx.senderIsOwner) return;
+  const roles = routeItem({ category: row.category, urgency: row.urgency });
+  const mine = claimRoles(store, ctx);
+  if (!roles.some(role => mine.includes(role))) return fail("not a member of this item's role");
+}
+
+function pendingDraftForItem(store: Store, itemId: number): Draft | undefined {
+  return store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1").get(itemId) as Draft | undefined;
 }
 
 export function registerAhaTools(api: {
@@ -487,6 +512,224 @@ export function registerAhaTools(api: {
         const role = roleForChat(getConfig(store), ctx.nativeChannelId);
         if (!role) return fail("this chat is not a role group");
         return ok({ role, ...sliceItems(store, role) });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_approve",
+    label: "Approve an AHA draft",
+    description: "Approve the pending draft for an item (AHA-n is always the item id). Owner or a member of the item's role. Sends the reply text to this chat; the tool result is only {sent:true}.",
+    parameters: {
+      type: "object",
+      required: ["draftId"],
+      additionalProperties: false,
+      properties: { draftId: { type: ["integer", "string"] } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const id = publicId(args.draftId);
+      if (!id) return fail("draftId is required");
+      const store = openStore();
+      try {
+        const draft = pendingDraftForItem(store, id);
+        if (!draft || draft.state !== "pending") return fail("draft not found");
+        const blocked = canActOnItem(store, ctx, draft.itemId);
+        if (blocked) return blocked;
+        const now = new Date();
+        const policy = checkPolicy(store, draft, now);
+        if (!policy.allow) return ok({ sent: false, reason: policy.reasons.join("; ") });
+        const claimed = store.db.prepare("UPDATE drafts SET state = 'approved' WHERE id = ? AND state = 'pending'").run(draft.id);
+        if (claimed.changes !== 1) return fail("draft is not claimable");
+        recordReady(store, draft, now);
+        const chat = ctx.nativeChannelId;
+        if (!chat) return fail("missing chat");
+        const item = store.db.prepare("SELECT url FROM items WHERE id = ?").get(draft.itemId) as { url: string | null };
+        const text = `${draft.body}${item.url ? `\n${item.url}` : ""}`;
+        const result = await sendToChat(chat, text, `approve:${draft.id}`, { store });
+        return ok(digestSendReply(result));
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_edit",
+    label: "Edit an AHA draft",
+    description: "Replace the body of a pending draft. Owner or a member of the item's role.",
+    parameters: {
+      type: "object",
+      required: ["draftId", "text"],
+      additionalProperties: false,
+      properties: {
+        draftId: { type: ["integer", "string"] },
+        text: { type: "string", minLength: 1 },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const id = publicId(args.draftId);
+      const text = typeof args.text === "string" ? args.text : "";
+      if (!id) return fail("draftId is required");
+      if (!text.trim()) return fail("text is required");
+      const store = openStore();
+      try {
+        const draft = pendingDraftForItem(store, id);
+        if (!draft || draft.state !== "pending") return fail("draft not found");
+        const blocked = canActOnItem(store, ctx, draft.itemId);
+        if (blocked) return blocked;
+        const cfg = getConfig(store);
+        const row = store.db.prepare(`SELECT items.url, classifications.language FROM items
+          LEFT JOIN classifications ON classifications.item_id = items.id WHERE items.id = ?`).get(draft.itemId) as {
+          url: string | null; language: string | null;
+        };
+        const checked = validateReply(text, {
+          company: cfg?.company.name || "AHA",
+          lang: row.language || cfg?.language || "en",
+          url: row.url,
+          links: cfg?.links,
+        });
+        if (!checked.ok) return fail(`draft failed validation: ${checked.reason}`);
+        store.db.prepare("UPDATE drafts SET body = ? WHERE id = ?").run(checked.body, draft.id);
+        return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, edited: true });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_ignore",
+    label: "Ignore an AHA draft",
+    description: "Ignore a pending draft. Owner or a member of the item's role.",
+    parameters: {
+      type: "object",
+      required: ["draftId", "reason"],
+      additionalProperties: false,
+      properties: {
+        draftId: { type: ["integer", "string"] },
+        reason: { type: "string", minLength: 1 },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const id = publicId(args.draftId);
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!id) return fail("draftId is required");
+      if (!reason) return fail("reason is required");
+      const store = openStore();
+      try {
+        const draft = pendingDraftForItem(store, id);
+        if (!draft || draft.state !== "pending") return fail("draft not found");
+        const blocked = canActOnItem(store, ctx, draft.itemId);
+        if (blocked) return blocked;
+        store.db.prepare("UPDATE drafts SET state = 'ignored' WHERE id = ? AND state = 'pending'").run(draft.id);
+        return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, ignored: true });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_not_us",
+    label: "Mark an AHA item as not us",
+    description: "Record a negative classification example for this item. Owner or a member of the item's role.",
+    parameters: {
+      type: "object",
+      required: ["itemId"],
+      additionalProperties: false,
+      properties: { itemId: { type: ["integer", "string"] } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const itemId = publicId(args.itemId);
+      if (!itemId) return fail("itemId is required");
+      const store = openStore();
+      try {
+        const blocked = canActOnItem(store, ctx, itemId);
+        if (blocked) return blocked;
+        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'negative', ?)").run(itemId, `NOT US AHA-${itemId}`);
+        store.db.prepare("UPDATE items SET state = 'irrelevant' WHERE id = ?").run(itemId);
+        return ok({ itemId, publicId: `AHA-${itemId}`, recorded: true });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_logs",
+    label: "Show AHA item history",
+    description: "Return store history for an item (AHA-n). Owner or a member of the item's role. Omits the public post body.",
+    parameters: {
+      type: "object",
+      required: ["id"],
+      additionalProperties: false,
+      properties: { id: { type: ["integer", "string"] } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const itemId = publicId(args.id);
+      if (!itemId) return fail("id is required");
+      const store = openStore();
+      try {
+        const blocked = canActOnItem(store, ctx, itemId);
+        if (blocked) return blocked;
+        const item = store.db.prepare("SELECT id, source, external_id, url, state, assignee, fetched_at FROM items WHERE id = ?").get(itemId);
+        if (!item) return fail("item not found");
+        const classification = store.db.prepare("SELECT category, urgency, about, confidence, language, is_question FROM classifications WHERE item_id = ?").get(itemId) ?? null;
+        const drafts = store.db.prepare("SELECT id, state, length(body) AS chars FROM drafts WHERE item_id = ? ORDER BY id").all(itemId);
+        const feedback = store.db.prepare("SELECT id, kind FROM feedback_examples WHERE item_id = ? ORDER BY id").all(itemId);
+        const ident = store.db.prepare("SELECT source, external_id FROM items WHERE id = ?").get(itemId) as { source: string; external_id: string };
+        const ledger = store.db.prepare("SELECT key, state, url FROM ledger WHERE key LIKE ? OR key = ?").all(`post:%:${ident.source}:${ident.external_id}`, `thread:${ident.source}:${ident.external_id}`);
+        return ok({ publicId: `AHA-${itemId}`, item, classification, drafts, feedback, ledger });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_pause",
+    label: "Pause AHA sending",
+    description: "Owner only. Blocks group sends and auto-replies immediately. Survives restart.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const store = openStore();
+      try {
+        store.db.prepare("UPDATE flags SET paused = 1 WHERE id = 1").run();
+        const drafts = (store.db.prepare("SELECT COUNT(*) AS n FROM drafts WHERE state = 'pending'").get() as { n: number }).n;
+        const items = (store.db.prepare("SELECT COUNT(*) AS n FROM items WHERE state IN ('new', 'relevant', 'assigned')").get() as { n: number }).n;
+        return ok({ paused: true, queued: { drafts, items } });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_resume",
+    label: "Resume AHA sending",
+    description: "Owner only. Clears PAUSE.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const store = openStore();
+      try {
+        store.db.prepare("UPDATE flags SET paused = 0 WHERE id = 1").run();
+        return ok({ paused: false });
       } finally {
         store.close();
       }
