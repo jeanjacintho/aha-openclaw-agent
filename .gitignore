@@ -1,4 +1,6 @@
 docs/
+checks/
 plow-credentials
 node_modules/
 dist/
+.maestri/

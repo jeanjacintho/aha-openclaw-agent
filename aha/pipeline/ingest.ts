@@ -9,14 +9,34 @@ export type IngestReport = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function termsFrom(cfg: AhaConfig) {
-  return [...new Set([cfg.company.name, ...(cfg.company.aliases ?? []), cfg.company.domain].filter((value): value is string => Boolean(value && value.trim())))];
+  const raw = [cfg.company.name, ...(cfg.company.aliases ?? []), cfg.company.domain].filter((value): value is string => Boolean(value && value.trim()));
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of raw) {
+    const key = value.trim().toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 export function passesFilter1(item: RawItem, cfg: AhaConfig) {
-  const hay = `${item.title ?? ""} ${item.body} ${item.url}`.toLowerCase();
+  // The url is left out of the searched text: a domain like "plow-pbc" can
+  // appear in a source's own URL (e.g. the Agent Index repo path) without the
+  // content itself mentioning the company, which used to let unrelated items
+  // pass by accident.
+  const hay = `${item.title ?? ""} ${item.body}`.toLowerCase();
+  const negative = (cfg.company.negative ?? []).map(word => word.toLowerCase());
+  const passesNegative = !negative.some(word => word && hay.includes(word));
+  // Agent Index comments already live inside an `agent:<slug>` discussion for
+  // this company, so they are on-topic by construction; only the negative
+  // word check still applies (spec §6.2 is about disambiguating a bare
+  // mention, which doesn't apply here).
+  if (item.source === "agent-index") return passesNegative;
   const aliases = termsFrom(cfg).map(term => term.toLowerCase());
-  if (!aliases.some(term => hay.includes(term.toLowerCase()))) return false;
-  return !(cfg.company.negative ?? []).some(word => word && hay.includes(word.toLowerCase()));
+  if (!aliases.some(term => hay.includes(term))) return false;
+  return passesNegative;
 }
 
 function queryFor(cfg: AhaConfig, now: Date): SourceQuery {
@@ -31,12 +51,18 @@ function insertItem(store: Store, item: RawItem, now: Date) {
   ).changes;
 }
 
-function recordRun(store: Store, source: string, query: SourceQuery, status: string, detail: string | undefined, stored: number) {
+function recordRun(store: Store, source: string, query: SourceQuery, status: string, detail: string | undefined) {
   store.db.prepare("INSERT INTO source_runs (source, window_start, window_end, status, detail) VALUES (?, ?, ?, ?, ?)").run(
-    source, query.since.toISOString(), query.until.toISOString(), status, detail ?? (stored ? String(stored) : null),
+    source, query.since.toISOString(), query.until.toISOString(), status, detail ?? null,
   );
 }
 
+const MAX_PAGES_PER_SOURCE = 500;
+
+// `fetchImpl` is part of the public contract from spec §9.2; adapters already
+// carry their own injected `fetch` from construction, so runIngest itself has
+// nothing to pass it to today. Kept for interface compatibility with future
+// adapters/tests that may want a shared default.
 export async function runIngest(store: Store, adapters: SourceAdapter[], now: Date, _fetchImpl?: typeof fetch): Promise<IngestReport> {
   const cfg = getConfig(store);
   if (!cfg) return { sources: [] };
@@ -49,6 +75,7 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
     let status: IngestReport["sources"][number]["status"] = "ok";
     let detail: string | undefined;
     try {
+      let pages = 0;
       do {
         const result = await adapter.fetch(query, cursor);
         if (!result.ok) {
@@ -61,12 +88,18 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
           stored += Number(insertItem(store, item, now));
         }
         cursor = result.nextCursor;
+        pages += 1;
+        if (pages >= MAX_PAGES_PER_SOURCE && cursor) {
+          status = "error";
+          detail = "too_many_pages";
+          break;
+        }
       } while (cursor);
     } catch (error) {
       status = "error";
       detail = error instanceof Error ? error.message : "unknown";
     }
-    recordRun(store, adapter.id, query, status, detail, stored);
+    recordRun(store, adapter.id, query, status, detail);
     sources.push({ id: adapter.id, status, stored, detail });
   }
   return { sources };
