@@ -20,15 +20,16 @@ export type SourceHealth = {
   detail: string | null;
 };
 
-export type TopicCount = {
+export type CompetitorTopicCount = {
+  competitor: string;
   topic: string;
   n: number;
 };
 
 export type CompetitorSummary = {
-  theyWin: TopicCount[];
-  theyComplain: TopicCount[];
-  weSolved: TopicCount[];
+  theyWin: CompetitorTopicCount[];
+  theyComplain: CompetitorTopicCount[];
+  weSolved: string[];
 };
 
 export type DigestModel = {
@@ -115,56 +116,62 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
     items: ranked,
     sources,
     trends: role === "founder" ? detectTrends(s, until) : [],
-    competitors: role === "founder" ? competitorSummary(s, until) : undefined,
+    competitors: role === "founder" && isCompetitionDigestDay(until, tz) ? competitorSummary(s, until) : undefined,
   };
 }
 
 const WEEK_MS = 7 * DAY_MS;
+const COUNTED_STATES = "('relevant', 'assigned', 'escalated')";
+
+export function isCompetitionDigestDay(until: Date, tz = "UTC") {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(until);
+  return weekday === "Mon";
+}
+
+function competitorName(about: string) {
+  return about.startsWith("competitor:") ? about.slice("competitor:".length) : about;
+}
 
 function topicCounts(s: Store, sql: string, params: unknown[]) {
-  return (s.db.prepare(sql).all(...params) as TopicCount[]).map(row => ({ topic: row.topic, n: Number(row.n) }));
+  return (s.db.prepare(sql).all(...params) as { about: string; topic: string; n: number }[]).map(row => ({
+    competitor: competitorName(row.about),
+    topic: row.topic,
+    n: Number(row.n),
+  }));
 }
 
 export function competitorSummary(s: Store, until: Date): CompetitorSummary {
   const untilIso = until.toISOString();
   const weekStart = new Date(until.getTime() - WEEK_MS).toISOString();
-  const theyWin = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+  const theyWin = topicCounts(s, `SELECT classifications.about AS about, classifications.topic AS topic, COUNT(*) AS n
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
       AND classifications.about LIKE 'competitor:%'
       AND classifications.category IN ('praise', 'comparison')
       AND classifications.topic IS NOT NULL AND classifications.topic != ''
-    GROUP BY classifications.topic
-    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
-  const theyComplain = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+    GROUP BY classifications.about, classifications.topic
+    ORDER BY n DESC, about ASC, topic ASC`, [weekStart, untilIso]);
+  const theyComplain = topicCounts(s, `SELECT classifications.about AS about, classifications.topic AS topic, COUNT(*) AS n
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
       AND classifications.about LIKE 'competitor:%'
       AND classifications.category IN ('complaint', 'bug')
       AND classifications.topic IS NOT NULL AND classifications.topic != ''
-    GROUP BY classifications.topic
-    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
-  const weSolved = topicCounts(s, `SELECT classifications.topic AS topic, COUNT(*) AS n
+    GROUP BY classifications.about, classifications.topic
+    ORDER BY n DESC, about ASC, topic ASC`, [weekStart, untilIso]);
+  const weSolved = (s.db.prepare(`SELECT DISTINCT classifications.topic AS topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.fetched_at > ? AND items.fetched_at <= ?
+    JOIN promises ON promises.topic = classifications.topic AND promises.status = 'resolvida'
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
       AND classifications.about LIKE 'competitor:%'
       AND classifications.category IN ('complaint', 'bug')
       AND classifications.topic IS NOT NULL AND classifications.topic != ''
-      AND (
-        EXISTS (
-          SELECT 1 FROM promises
-          WHERE promises.topic = classifications.topic AND promises.status = 'resolvida'
-        )
-        OR EXISTS (
-          SELECT 1 FROM classifications AS ours
-          JOIN items AS ours_items ON ours_items.id = ours.item_id
-          WHERE ours.topic = classifications.topic AND ours.about = 'self' AND ours.category = 'praise'
-        )
-      )
-    GROUP BY classifications.topic
-    ORDER BY n DESC, topic ASC`, [weekStart, untilIso]);
+    ORDER BY topic ASC`).all(weekStart, untilIso) as { topic: string }[]).map(row => row.topic);
   return { theyWin, theyComplain, weSolved };
 }

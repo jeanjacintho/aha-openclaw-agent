@@ -1,5 +1,5 @@
 import { uniqueTermsCaseInsensitive } from "./hn.ts";
-import { phQueryComplexity, phRemaining, phResetMs, phShouldBackoff, retryAfterMs } from "./http.ts";
+import { phNextCost, phQueryComplexity, phRemaining, phResetMs, phShouldBackoff } from "./http.ts";
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
 
 const GQL = "https://api.producthunt.com/v2/api/graphql";
@@ -127,7 +127,11 @@ export function productHuntSource(opts: { fetch?: typeof fetch; token?: string }
         if (response.status === 401 || response.status === 403) return { ok: false, error: "auth" };
         if (!response.ok) return { ok: false, error: "unknown" };
         const remaining = phRemaining(response.headers);
-        const cost = phQueryComplexity(response.headers);
+        const cost = phNextCost({
+          headerCost: phQueryComplexity(response.headers),
+          previousRemaining: state.remaining,
+          remaining,
+        });
         const resetMs = phResetMs(response.headers);
         const payload = await response.json() as {
           data?: { post?: PostNode | null };

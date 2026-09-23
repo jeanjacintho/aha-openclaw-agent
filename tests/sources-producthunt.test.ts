@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { PH_COMPLEXITY_BUDGET, phShouldBackoff } from "../aha/sources/http.ts";
+import { PH_COMPLEXITY_BUDGET, PH_CONSERVATIVE_COST, phNextCost, phShouldBackoff } from "../aha/sources/http.ts";
 import { phSlug, productHuntSource } from "../aha/sources/producthunt.ts";
 import { type SourceQuery } from "../aha/sources/types.ts";
 
@@ -73,6 +73,30 @@ test("PH backs off when remaining complexity cannot cover the last query", async
   assert.equal(PH_COMPLEXITY_BUDGET, 6250);
   assert.equal(phShouldBackoff(50, 80), true);
   assert.equal(phShouldBackoff(80, 80), false);
+  assert.equal(phShouldBackoff(5, PH_CONSERVATIVE_COST), true);
+});
+
+test("PH backs off from remaining drop when complexity headers are absent", async () => {
+  let calls = 0;
+  const source = productHuntSource({
+    token: "ph_test",
+    fetch: async () => {
+      calls += 1;
+      return jsonResponse(await readFile(plow, "utf8"), {
+        "x-rate-limit-remaining": "5",
+        "x-rate-limit-reset": "15",
+      });
+    },
+  });
+  const first = await source.fetch(query, null);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const second = await source.fetch(query, first.nextCursor);
+  assert.deepEqual(second, { ok: false, error: "rate_limited", retryAfterMs: 15000 });
+  assert.equal(calls, 1);
+  assert.equal(phNextCost({ remaining: 5 }), PH_CONSERVATIVE_COST);
+  assert.equal(phNextCost({ previousRemaining: 200, remaining: 120 }), 80);
+  assert.equal(phShouldBackoff(5, undefined), true);
 });
 
 test("PH HTTP 429 is rate_limited", async () => {

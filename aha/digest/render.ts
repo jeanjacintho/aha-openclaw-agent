@@ -17,8 +17,8 @@ function sourceLine(model: DigestModel, lang: string) {
   });
 }
 
-function countList(rows: { topic: string; n: number }[]) {
-  return rows.map(row => `${row.topic} (${row.n})`).join(", ");
+function countList(rows: { competitor: string; topic: string; n: number }[]) {
+  return rows.map(row => `${row.competitor} ${row.topic} (${row.n})`).join(", ");
 }
 
 function competitorLines(m: DigestModel, lang: string) {
@@ -27,7 +27,7 @@ function competitorLines(m: DigestModel, lang: string) {
   const has = summary.theyWin.length + summary.theyComplain.length + summary.weSolved.length;
   if (has === 0) return [];
   const pt = lang.startsWith("pt");
-  const lines = [pt ? "Concorrência (7d)" : "Competition (7d)"];
+  const lines = [pt ? "Concorrência (7d, segunda)" : "Competition (7d, Monday)"];
   if (summary.theyWin.length) {
     lines.push(pt ? `eles ganham em: ${countList(summary.theyWin)}` : `they win at: ${countList(summary.theyWin)}`);
   }
@@ -35,7 +35,10 @@ function competitorLines(m: DigestModel, lang: string) {
     lines.push(pt ? `eles reclamam de: ${countList(summary.theyComplain)}` : `they complain about: ${countList(summary.theyComplain)}`);
   }
   if (summary.weSolved.length) {
-    lines.push(pt ? `nós já resolvemos: ${countList(summary.weSolved)}` : `we already solved: ${countList(summary.weSolved)}`);
+    const topics = summary.weSolved.join(", ");
+    lines.push(pt
+      ? `nós já resolvemos: ${topics} (promessa resolvida)`
+      : `we already solved: ${topics} (resolved promise)`);
   }
   return lines;
 }

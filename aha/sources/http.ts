@@ -1,4 +1,5 @@
 export const PH_COMPLEXITY_BUDGET = 6250;
+export const PH_CONSERVATIVE_COST = 250;
 const PH_WINDOW_MS = 15 * 60 * 1000;
 
 export function retryAfterMs(headers: Headers) {
@@ -28,8 +29,17 @@ export function phResetMs(headers: Headers) {
   return reset * 1000;
 }
 
+export function phNextCost(opts: { headerCost?: number; previousRemaining?: number; remaining?: number }) {
+  if (opts.headerCost !== undefined) return opts.headerCost;
+  if (opts.previousRemaining !== undefined && opts.remaining !== undefined) {
+    const delta = opts.previousRemaining - opts.remaining;
+    if (delta > 0) return Math.min(delta, PH_COMPLEXITY_BUDGET);
+  }
+  return PH_CONSERVATIVE_COST;
+}
+
 export function phShouldBackoff(remaining: number | undefined, complexity: number | undefined) {
   if (remaining === undefined) return false;
-  if (complexity !== undefined) return remaining < complexity;
-  return remaining <= 0;
+  const need = Math.min(complexity ?? PH_CONSERVATIVE_COST, PH_COMPLEXITY_BUDGET);
+  return remaining < need;
 }
