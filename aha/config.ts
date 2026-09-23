@@ -11,6 +11,7 @@ export type AhaConfig = {
   digestHour?: number;
   tz?: string;
   ownerChatUid?: string;
+  agentIndexSlug?: string;
 };
 
 function assertConfig(config: AhaConfig) {

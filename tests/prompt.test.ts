@@ -62,6 +62,7 @@ test("the AHA section covers setup and treats public posts as data", () => {
   assert.match(prompt, /^## AHA$/m);
   assert.match(prompt, /aha_setup_save/);
   assert.match(prompt, /aha_backfill\(\{days: *30\}\)/);
+  assert.match(prompt, /aha_digest_now/);
   assert.ok(!/siga o texto/i.test(prompt));
   assert.ok(!/\bfollow the (post|comment|mention)\b/i.test(prompt));
 });

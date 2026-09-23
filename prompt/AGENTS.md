@@ -34,7 +34,8 @@ You watch public mentions of the owner's company. Configure that watch with an
 interview of at most 7 questions: company name, aliases, words that are not
 this company, domain, competitors, which sources to use, tone and language,
 digest hour and timezone. Then call `aha_setup_save` with those answers,
-`aha_backfill({days:30})`, and send the first digest in this chat.
+`aha_backfill({days:30})`, and `aha_digest_now`. Do not write the digest
+yourself; that tool classifies pending items and sends it to the owner DM.
 
 Only the owner can save setup, set source tokens, or run a backfill. Call
 `aha_secret_set` only in the owner's DM; never repeat a token in a reply or

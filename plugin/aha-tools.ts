@@ -1,15 +1,19 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
+import { deliverDigest } from "../aha/digest/deliver.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
-import { agentIndexSource } from "../aha/sources/agent-index.ts";
-import { hnSource } from "../aha/sources/hn.ts";
+import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore } from "../aha/store/db.ts";
+import { ownerChat, type Account } from "./transport.ts";
+
+type PlowChannel = { apiBase?: string; lineUid?: string; emailLineUid?: string; accountId?: string };
 
 type Requester = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   nativeChannelId?: string;
+  config?: object;
 };
 
 type ToolResult = {
@@ -48,18 +52,54 @@ function requireMember(ctx: Requester) {
   if (!ctx.requesterSenderId) return fail("missing requester");
 }
 
-function requireOwnerDm(ctx: Requester) {
+function plowAccount(ctx: Requester): Account | undefined {
+  const plow = ctx.config && typeof ctx.config === "object"
+    ? (ctx.config as { channels?: { plow?: PlowChannel } }).channels?.plow
+    : undefined;
+  if (!plow?.apiBase || !plow.lineUid) return undefined;
+  return { apiBase: plow.apiBase, lineUid: plow.lineUid, emailLineUid: plow.emailLineUid, accountId: plow.accountId ?? "chat" };
+}
+
+async function ownerDmUid(ctx: Requester) {
+  const account = plowAccount(ctx);
+  if (!account) throw new Error("Plow configuration is unavailable");
+  const chat = await ownerChat(account);
+  if (chat.participants.length !== 2) throw new Error("owner DM is not a direct chat");
+  return chat.uid;
+}
+
+async function requireOwnerDm(ctx: Requester) {
   const denied = requireOwner(ctx);
   if (denied) return denied;
-  const store = openStore();
   try {
-    const ownerChat = getConfig(store)?.ownerChatUid;
-    if (!ctx.nativeChannelId || !ownerChat || ctx.nativeChannelId !== ownerChat) {
-      return fail("secrets can only be set in the owner DM");
-    }
-  } finally {
-    store.close();
+    const uid = await ownerDmUid(ctx);
+    if (!ctx.nativeChannelId || ctx.nativeChannelId !== uid) return fail("secrets can only be set in the owner DM");
+  } catch {
+    return fail("secrets can only be set in the owner DM");
   }
+}
+
+function mergeSetup(previous: AhaConfig | null, args: Record<string, unknown>, ownerChatUid: string): AhaConfig {
+  const company = typeof args.company === "string" ? args.company.trim() : previous?.company.name ?? "";
+  return {
+    ...previous,
+    company: {
+      ...previous?.company,
+      name: company,
+      aliases: strings(args.aliases) ?? previous?.company.aliases,
+      negative: strings(args.negatives) ?? previous?.company.negative,
+      domain: typeof args.domain === "string" ? args.domain : previous?.company.domain,
+    },
+    competitors: strings(args.competitors) ?? previous?.competitors,
+    sources: strings(args.sources) ?? previous?.sources,
+    knowledge: typeof args.knowledge === "string" ? args.knowledge : previous?.knowledge,
+    voice: typeof args.tone === "string" ? args.tone : previous?.voice,
+    language: typeof args.lang === "string" ? args.lang : previous?.language,
+    digestHour: typeof args.digestHour === "number" ? args.digestHour : previous?.digestHour,
+    tz: typeof args.tz === "string" ? args.tz : previous?.tz,
+    agentIndexSlug: previous?.agentIndexSlug || process.env.AGENT_ID,
+    ownerChatUid,
+  };
 }
 
 export function registerAhaTools(api: {
@@ -75,7 +115,7 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_setup_save",
     label: "Save AHA setup",
-    description: "Save the company watch configuration from the setup interview. Owner only.",
+    description: "Save the company watch configuration from the setup interview. Owner only. Pins the owner DM from the host, not the chat that called the tool.",
     parameters: {
       type: "object",
       required: ["company"],
@@ -99,25 +139,15 @@ export function registerAhaTools(api: {
       if (denied) return denied;
       const company = typeof args.company === "string" ? args.company.trim() : "";
       if (!company) return fail("company is required");
-      const config: AhaConfig = {
-        company: {
-          name: company,
-          aliases: strings(args.aliases),
-          negative: strings(args.negatives),
-          domain: typeof args.domain === "string" ? args.domain : undefined,
-        },
-        competitors: strings(args.competitors),
-        sources: strings(args.sources),
-        knowledge: typeof args.knowledge === "string" ? args.knowledge : undefined,
-        voice: typeof args.tone === "string" ? args.tone : undefined,
-        language: typeof args.lang === "string" ? args.lang : undefined,
-        digestHour: typeof args.digestHour === "number" ? args.digestHour : undefined,
-        tz: typeof args.tz === "string" ? args.tz : undefined,
-        ownerChatUid: ctx.nativeChannelId,
-      };
+      let ownerChatUid: string;
+      try {
+        ownerChatUid = await ownerDmUid(ctx);
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "cannot resolve owner DM");
+      }
       const store = openStore();
       try {
-        saveConfig(store, config);
+        saveConfig(store, mergeSetup(getConfig(store), args, ownerChatUid));
       } finally {
         store.close();
       }
@@ -140,7 +170,7 @@ export function registerAhaTools(api: {
       },
     },
     async execute(_id, args) {
-      const denied = requireOwnerDm(ctx);
+      const denied = await requireOwnerDm(ctx);
       if (denied) return denied;
       const source = typeof args.source === "string" ? args.source : "";
       const field = secretField(source);
@@ -201,16 +231,35 @@ export function registerAhaTools(api: {
       if (!Number.isInteger(days) || days < 1 || days > MAX_BACKFILL_DAYS) {
         return fail("backfill days must be an integer from 1 to 30");
       }
+      // Spec §8.1 wants collection on the worker. This still runs in the gateway
+      // process for the tool call; public text is not returned to the model.
       const store = openStore();
       try {
-        const secrets = readSecrets();
-        const report = await runBackfill(store, [
-          hnSource(),
-          agentIndexSource({ token: secrets.github, slug: getConfig(store)?.company.name }),
-        ], days);
+        const report = await runBackfill(store, watchAdapters(getConfig(store)), days);
         return ok(report);
       } catch (error) {
         return fail(error instanceof Error ? error.message : "backfill failed");
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_digest_now",
+    label: "Send the AHA digest now",
+    description: "Classify pending items and send the digest to the owner DM. Owner only. Returns {sent:true} without digest text.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const store = openStore();
+      try {
+        const result = await deliverDigest(store);
+        if (result !== "sent" && result !== "duplicate") return fail(`digest ${result}`);
+        return ok({ sent: true });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "digest failed");
       } finally {
         store.close();
       }
