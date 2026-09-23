@@ -1,7 +1,19 @@
+# Local install: plow-agents deploy --local --line LINE_UID
+# (mints ./plow-credentials, then docker compose up --build -d).
+#
+# Agent Index identity is parametrizable. Defaults match the Dockerfile.
+# Override with a `.env` file next to this compose file, or export before up:
+#   AGENT_ID, AGENT_NAME, AGENT_BLURB
+# AGENT_ID uses ${VAR-default} (not :-) so an explicit empty value stays empty
+# and skips Index register/report. Unset still defaults to aha.
 services:
   agent:
     build: .
     env_file: ./plow-credentials
+    environment:
+      AGENT_ID: ${AGENT_ID-aha}
+      AGENT_NAME: ${AGENT_NAME:-AHA}
+      AGENT_BLURB: ${AGENT_BLURB:-Watches public mentions of your company. Hacker News and Agent Index comments, then a daily digest on Plow.}
     volumes:
       - state:/var/lib/plow
     stop_grace_period: 35s
