@@ -33,6 +33,8 @@ export function parseDue(due: string): Date {
   return at;
 }
 
+const COUNTED_STATES = new Set(["relevant", "assigned", "escalated"]);
+
 function windowCounts(store: Store, topic: string, start: Date, end: Date) {
   const want = normalizeTopic(topic);
   const rows = store.db.prepare(`SELECT items.state AS state, classifications.topic AS topic, classifications.about AS about, classifications.urgency AS urgency, classifications.category AS category
@@ -41,7 +43,7 @@ function windowCounts(store: Store, topic: string, start: Date, end: Date) {
     WHERE items.published_at >= ? AND items.published_at < ?`).all(start.toISOString(), end.toISOString()) as {
     state: string; topic: string | null; about: string | null; urgency: string | null; category: string | null;
   }[];
-  const hits = rows.filter(row => row.state === "relevant" && row.about === "self" && normalizeTopic(row.topic ?? "") === want);
+  const hits = rows.filter(row => COUNTED_STATES.has(row.state) && row.about === "self" && normalizeTopic(row.topic ?? "") === want);
   return {
     count: hits.length,
     high: hits.some(row => row.urgency === "high"),
@@ -66,10 +68,9 @@ export function checkPromises(store: Store, now: Date): PromiseResult[] {
     const before = windowCounts(store, row.topic, new Date(due.getTime() - WINDOW_DAYS * DAY_MS), due);
     const after = windowCounts(store, row.topic, due, new Date(due.getTime() + WINDOW_DAYS * DAY_MS));
     let result: PromiseResult["result"];
-    if (before.count + after.count < 3) result = "sem sinal";
+    if (before.count < 3 || after.count < 3) result = "sem sinal";
     else if (after.count <= before.count * 0.5 && !after.high) result = "resolvida";
     else result = "persiste";
-    store.db.prepare("UPDATE promises SET status = ? WHERE id = ? AND status = 'open'").run(result, row.id);
     results.push({
       id: row.id,
       topic: row.topic,
@@ -89,10 +90,15 @@ function resultLine(row: PromiseResult, lang: string) {
   return `Promise ${row.id} (${row.topic}): ${row.result} · before ${row.before}, after ${row.after}`;
 }
 
+function delivered(result: string) {
+  return result === "sent" || result === "duplicate";
+}
+
 export async function notifyPromiseResults(store: Store, results: PromiseResult[], deps: SendDeps = {}) {
   const cfg = getConfig(store);
   const ownerDm = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   const lang = cfg?.language || "pt";
+  const done: PromiseResult[] = [];
   for (const row of results) {
     const due = parseDue(row.due);
     const before = windowCounts(store, row.topic, new Date(due.getTime() - WINDOW_DAYS * DAY_MS), due);
@@ -100,13 +106,20 @@ export async function notifyPromiseResults(store: Store, results: PromiseResult[
     const role = relatedRole([...before.categories, ...after.categories]);
     const text = resultLine(row, lang);
     const roleChat = cfg?.roleChats?.[role];
-    if (ownerDm) {
-      await sendToChat(ownerDm, text, `promise:${row.id}:${row.result}:dm:${ownerDm}`, { store, fetch: deps.fetch, now: deps.now });
+    const dests: { chat: string; key: string }[] = [];
+    if (ownerDm) dests.push({ chat: ownerDm, key: `promise:${row.id}:${row.result}:dm:${ownerDm}` });
+    if (roleChat && roleChat !== ownerDm) dests.push({ chat: roleChat, key: `promise:${row.id}:${row.result}:role:${role}:${roleChat}` });
+    if (dests.length === 0) continue;
+    const outcomes = [];
+    for (const dest of dests) {
+      outcomes.push(await sendToChat(dest.chat, text, dest.key, { store, fetch: deps.fetch, now: deps.now }));
     }
-    if (roleChat && roleChat !== ownerDm) {
-      await sendToChat(roleChat, text, `promise:${row.id}:${row.result}:role:${role}:${roleChat}`, { store, fetch: deps.fetch, now: deps.now });
+    if (outcomes.every(delivered)) {
+      store.db.prepare("UPDATE promises SET status = ? WHERE id = ? AND status = 'open'").run(row.result, row.id);
+      done.push(row);
     }
   }
+  return done;
 }
 
 export async function runPromiseChecks(store: Store, now: Date, deps: SendDeps = {}) {

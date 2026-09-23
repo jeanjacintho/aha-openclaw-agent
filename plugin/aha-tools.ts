@@ -154,19 +154,19 @@ function sliceItems(store: Store, role: Role) {
   };
 }
 
-type MemberEntry = { uid: string; providerKey: string };
+type MemberEntry = { uid: string; providerKey: string; displayName: string };
 
 async function memberDirectory(account: Account): Promise<MemberEntry[]> {
   const listing = await request<Page<Chat>>(account, "/chats");
   if (listing.has_more) throw new Error("Cannot resolve members from a truncated chat listing");
-  const byUid = new Map<string, string>();
+  const byUid = new Map<string, MemberEntry>();
   for (const chat of listing.data ?? []) {
     for (const person of chat.participants) {
       if (person.type !== "member" || !person.uid || !person.provider_key) continue;
-      byUid.set(person.uid, person.provider_key);
+      byUid.set(person.uid, { uid: person.uid, providerKey: person.provider_key, displayName: person.display_name || person.uid });
     }
   }
-  return [...byUid.entries()].map(([uid, providerKey]) => ({ uid, providerKey }));
+  return [...byUid.values()];
 }
 
 function resolveMember(directory: MemberEntry[], memberUid: string): MemberEntry | undefined {
@@ -765,14 +765,25 @@ export function registerAhaTools(api: {
       } catch {
         return fail("due must be a date");
       }
+      const account = plowAccount(ctx);
+      if (!account) return fail("Plow configuration is unavailable");
+      let owner: MemberEntry;
+      try {
+        const directory = await memberDirectory(account);
+        const resolved = resolveMember(directory, ownerUid);
+        if (!resolved) return fail("unknown member");
+        owner = resolved;
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "could not list members");
+      }
       const store = openStore();
       try {
         const at = new Date().toISOString();
         const inserted = store.db.prepare("INSERT INTO promise_proposals (topic, due, owner, proposed_by, created_at) VALUES (?, ?, ?, ?, ?)")
-          .run(topic, due, ownerUid, ctx.requesterSenderId, at);
+          .run(topic, due, owner.uid, ctx.requesterSenderId, at);
         const proposalId = Number(inserted.lastInsertRowid);
-        const confirmText = `Registrado: ${topic}, prazo ${due}, dono ${ownerUid}. Certo? Confirme com aha_promise_confirm({proposalId:${proposalId}}).`;
-        return ok({ proposalId, confirmText, topic, due, ownerUid });
+        const confirmText = `Registrado: ${topic}, prazo ${due}, dono ${owner.displayName}. Certo? Confirme com aha_promise_confirm({proposalId:${proposalId}}).`;
+        return ok({ proposalId, confirmText, topic, due, ownerUid: owner.uid, ownerName: owner.displayName });
       } finally {
         store.close();
       }
@@ -796,15 +807,26 @@ export function registerAhaTools(api: {
       if (!Number.isInteger(proposalId) || proposalId < 1) return fail("proposalId is required");
       const store = openStore();
       try {
-        const proposal = store.db.prepare("SELECT id, topic, due, owner FROM promise_proposals WHERE id = ?").get(proposalId) as {
-          id: number; topic: string; due: string; owner: string;
-        } | undefined;
-        if (!proposal) return fail("proposal not found");
-        if (ctx.senderIsOwner !== true && ctx.requesterSenderId !== proposal.owner) return fail("only the promise owner or the company owner can confirm");
-        const inserted = store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES (?, ?, ?, 'open')")
-          .run(proposal.topic, proposal.due, proposal.owner);
-        store.db.prepare("DELETE FROM promise_proposals WHERE id = ?").run(proposal.id);
-        return ok({ promiseId: Number(inserted.lastInsertRowid), topic: proposal.topic, due: proposal.due, owner: proposal.owner, status: "open" });
+        let saved: { promiseId: number; topic: string; due: string; owner: string };
+        try {
+          saved = store.tx(() => {
+            const proposal = store.db.prepare("SELECT id, topic, due, owner FROM promise_proposals WHERE id = ?").get(proposalId) as {
+              id: number; topic: string; due: string; owner: string;
+            } | undefined;
+            if (!proposal) throw new Error("proposal not found");
+            if (ctx.senderIsOwner !== true && ctx.requesterSenderId !== proposal.owner) {
+              throw new Error("only the promise owner or the company owner can confirm");
+            }
+            const deleted = store.db.prepare("DELETE FROM promise_proposals WHERE id = ?").run(proposal.id);
+            if (deleted.changes !== 1) throw new Error("proposal not found");
+            const inserted = store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES (?, ?, ?, 'open')")
+              .run(proposal.topic, proposal.due, proposal.owner);
+            return { promiseId: Number(inserted.lastInsertRowid), topic: proposal.topic, due: proposal.due, owner: proposal.owner };
+          });
+        } catch (error) {
+          return fail(error instanceof Error ? error.message : "could not confirm");
+        }
+        return ok({ ...saved, status: "open" });
       } finally {
         store.close();
       }

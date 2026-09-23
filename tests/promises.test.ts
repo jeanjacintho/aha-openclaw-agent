@@ -20,6 +20,13 @@ type ToolCtx = {
   nativeChannelId?: string;
 };
 
+const owner = { type: "member", uid: "plow-owner", role: "owner", display_name: "Owner", provider_key: "+15550001111" };
+const self = { type: "agent", relationship: "self", line: { uid: "line" } };
+const ana = { type: "member", uid: "mem_ana", role: "member", display_name: "Ana", provider_key: "+15550002222" };
+const mkt = { type: "member", uid: "mem_mkt", role: "member", display_name: "Mkt", provider_key: "+15550003333" };
+const dm = { uid: "cht_dm", status: "active", trusted: true, participants: [self, owner] };
+const team = { uid: "cht_team", status: "active", trusted: true, participants: [self, owner, ana, mkt] };
+
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
   t.after(() => { for (const key of Object.keys({ ...values, ...process.env })) if (key in environment) process.env[key] = environment[key]; else delete process.env[key]; });
@@ -32,7 +39,9 @@ async function home(t: import("node:test").TestContext, posts: { url: string; bo
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/v1/chats") && method === "GET") return Response.json({ data: [dm, team], has_more: false });
+    if (method === "POST" && url.includes("/messages")) {
       posts.push({ url, body: String(init?.body ?? "") });
       return Response.json({ uid: "msg_ok" });
     }
@@ -66,16 +75,30 @@ function tools(ctx: ToolCtx) {
   return byName;
 }
 
-function mention(dir: string, over: { ext: string; published: string; topic: string; urgency?: string; category?: string }) {
+function mention(dir: string, over: {
+  ext: string; published: string; topic: string; urgency?: string; category?: string; state?: string;
+}) {
   const store = openStore(dir);
   store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
-    VALUES ('hn', ?, 'https://example.test/x', 'a', 't', 'plow', ?, ?, 'relevant')`).run(over.ext, over.published, over.published);
+    VALUES ('hn', ?, 'https://example.test/x', 'a', 't', 'plow', ?, ?, ?)`).run(
+    over.ext, over.published, over.published, over.state ?? "relevant",
+  );
   const id = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, 0, ?, ?, 'en', 0, ?, 'self', 0.9)`).run(id, over.category ?? "bug", over.topic, over.urgency ?? "med");
   store.close();
   return id;
 }
+
+function seedOpen(dir: string, topic = "login") {
+  const store = openStore(dir);
+  store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES (?, '2026-09-26', 'mem_ana', 'open')").run(topic);
+  const id = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.close();
+  return id;
+}
+
+const checkAt = new Date("2026-10-04T00:00:00.000Z");
 
 test("the plugin exposes promise tools", async () => {
   const names: string[] = [];
@@ -102,6 +125,8 @@ test("propose does not write a promise until the ownerUid or owner confirms", as
   assert.equal(typeof details.proposalId, "number");
   assert.match(details.confirmText, /login/);
   assert.match(details.confirmText, /2026-09-26/);
+  assert.match(details.confirmText, /Ana/);
+  assert.equal(details.confirmText.includes("mem_ana"), false);
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM promises").get() as { n: number }).n, 0);
@@ -119,16 +144,44 @@ test("propose does not write a promise until the ownerUid or owner confirms", as
   assert.equal(parseDue(row.due).toISOString().slice(0, 10), "2026-09-26");
 });
 
+test("propose rejects an ownerUid that is not a directory member", async t => {
+  await home(t);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_ana", nativeChannelId: "cht_engenharia" });
+  const result = await member.get("aha_promise_propose")!.execute("call", {
+    topic: "login", due: "2026-09-26", ownerUid: "Ana",
+  });
+  assert.equal(result.isError, true);
+});
+
 test("the company owner can confirm a proposal they did not make", async t => {
+  const dir = await home(t);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_ana", nativeChannelId: "cht_engenharia" });
+  const proposed = await member.get("aha_promise_propose")!.execute("call", {
+    topic: "login", due: "2026-09-26", ownerUid: "+15550002222",
+  });
+  const proposalId = (proposed.details as { proposalId: number }).proposalId;
+  const ownerTool = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const confirmed = await ownerTool.get("aha_promise_confirm")!.execute("call", { proposalId });
+  assert.equal(confirmed.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal((store.db.prepare("SELECT owner FROM promises").get() as { owner: string }).owner, "mem_ana");
+});
+
+test("two confirms of the same proposal create one promise", async t => {
   const dir = await home(t);
   const member = tools({ senderIsOwner: false, requesterSenderId: "mem_ana", nativeChannelId: "cht_engenharia" });
   const proposed = await member.get("aha_promise_propose")!.execute("call", {
     topic: "login", due: "2026-09-26", ownerUid: "mem_ana",
   });
   const proposalId = (proposed.details as { proposalId: number }).proposalId;
-  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
-  const confirmed = await owner.get("aha_promise_confirm")!.execute("call", { proposalId });
-  assert.equal(confirmed.isError ?? false, false);
+  const ownerTool = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const [first, second] = await Promise.all([
+    member.get("aha_promise_confirm")!.execute("call", { proposalId }),
+    ownerTool.get("aha_promise_confirm")!.execute("call", { proposalId }),
+  ]);
+  assert.equal([first, second].filter(row => !(row.isError ?? false)).length, 1);
+  assert.equal([first, second].filter(row => row.isError).length, 1);
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM promises").get() as { n: number }).n, 1);
@@ -137,14 +190,14 @@ test("the company owner can confirm a proposal they did not make", async t => {
 test("aha_promises lists confirmed promises without public post text", async t => {
   const dir = await home(t);
   mention(dir, { ext: "secret", published: "2026-09-20T00:00:00.000Z", topic: "login" });
-  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
-  const proposed = await owner.get("aha_promise_propose")!.execute("call", {
+  const ownerTool = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const proposed = await ownerTool.get("aha_promise_propose")!.execute("call", {
     topic: "login", due: "2026-09-26", ownerUid: "mem_ana",
   });
-  const listedEmpty = await owner.get("aha_promises")!.execute("call", {});
+  const listedEmpty = await ownerTool.get("aha_promises")!.execute("call", {});
   assert.deepEqual((listedEmpty.details as { promises: unknown[] }).promises, []);
-  await owner.get("aha_promise_confirm")!.execute("call", { proposalId: (proposed.details as { proposalId: number }).proposalId });
-  const listed = await owner.get("aha_promises")!.execute("call", {});
+  await ownerTool.get("aha_promise_confirm")!.execute("call", { proposalId: (proposed.details as { proposalId: number }).proposalId });
+  const listed = await ownerTool.get("aha_promises")!.execute("call", {});
   const rows = (listed.details as { promises: { topic: string; owner: string; status: string }[] }).promises;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].topic, "login");
@@ -154,53 +207,96 @@ test("aha_promises lists confirmed promises without public post text", async t =
 
 test("checkPromises marks a 50% drop without high urgency as resolvida", async t => {
   const dir = await home(t);
-  const due = "2026-09-26";
-  for (let i = 0; i < 4; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
-  for (let i = 0; i < 2; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login" });
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login" });
+  seedOpen(dir);
   const store = openStore(dir);
   t.after(() => store.close());
-  store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES ('login', ?, 'mem_ana', 'open')").run(due);
-  const results = checkPromises(store, new Date("2026-10-04T00:00:00.000Z"));
+  const results = checkPromises(store, checkAt);
   assert.equal(results.length, 1);
   assert.equal(results[0].result, "resolvida");
-  assert.equal(results[0].before, 4);
-  assert.equal(results[0].after, 2);
-  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "resolvida");
+  assert.equal(results[0].before, 6);
+  assert.equal(results[0].after, 3);
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "open");
 });
 
-test("checkPromises returns sem sinal when both windows have fewer than 3 items together", async t => {
+test("checkPromises returns sem sinal when either window has fewer than 3 items", async t => {
   const dir = await home(t);
-  mention(dir, { ext: "only", published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "b0", published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "b1", published: "2026-09-23T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "a0", published: "2026-09-28T00:00:00.000Z", topic: "login" });
+  seedOpen(dir);
   const store = openStore(dir);
   t.after(() => store.close());
-  store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES ('login', '2026-09-26', 'mem_ana', 'open')").run();
-  const results = checkPromises(store, new Date("2026-10-04T00:00:00.000Z"));
+  const results = checkPromises(store, checkAt);
   assert.equal(results[0].result, "sem sinal");
+  assert.equal(results[0].before, 2);
+  assert.equal(results[0].after, 1);
 });
 
 test("checkPromises returns persiste when volume does not drop or a high item appears", async t => {
   const dir = await home(t);
-  for (let i = 0; i < 4; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
   mention(dir, { ext: "a0", published: "2026-09-28T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "a1", published: "2026-09-28T01:00:00.000Z", topic: "login" });
   mention(dir, { ext: "hot", published: "2026-09-29T00:00:00.000Z", topic: "login", urgency: "high" });
+  seedOpen(dir);
   const store = openStore(dir);
   t.after(() => store.close());
-  store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES ('login', '2026-09-26', 'mem_ana', 'open')").run();
-  const results = checkPromises(store, new Date("2026-10-04T00:00:00.000Z"));
+  const results = checkPromises(store, checkAt);
   assert.equal(results[0].result, "persiste");
-  assert.equal(results[0].before, 4);
-  assert.equal(results[0].after, 2);
+  assert.equal(results[0].before, 6);
+  assert.equal(results[0].after, 3);
+});
+
+test("checkPromises counts a relevant item in the after window", async t => {
+  const dir = await home(t);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login", state: "relevant" });
+  seedOpen(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(checkPromises(store, checkAt)[0].after, 3);
+});
+
+test("checkPromises counts an assigned item in the after window", async t => {
+  const dir = await home(t);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "a0", published: "2026-09-28T00:00:00.000Z", topic: "login", state: "relevant" });
+  mention(dir, { ext: "a1", published: "2026-09-28T01:00:00.000Z", topic: "login", state: "assigned" });
+  mention(dir, { ext: "a2", published: "2026-09-28T02:00:00.000Z", topic: "login", state: "assigned" });
+  seedOpen(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const result = checkPromises(store, checkAt)[0];
+  assert.equal(result.after, 3);
+  assert.equal(result.result, "resolvida");
+});
+
+test("checkPromises counts an escalated high item and does not mark resolvida", async t => {
+  const dir = await home(t);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+  mention(dir, { ext: "a0", published: "2026-09-28T00:00:00.000Z", topic: "login", state: "relevant" });
+  mention(dir, { ext: "hot", published: "2026-09-29T00:00:00.000Z", topic: "login", state: "escalated", urgency: "high", category: "security" });
+  mention(dir, { ext: "a1", published: "2026-09-28T01:00:00.000Z", topic: "login", state: "assigned", category: "complaint" });
+  mention(dir, { ext: "a2", published: "2026-09-28T02:00:00.000Z", topic: "login", state: "assigned", category: "complaint" });
+  seedOpen(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const result = checkPromises(store, checkAt)[0];
+  assert.equal(result.after, 4);
+  assert.equal(result.result, "persiste");
 });
 
 test("promise results go to the role group and owner DM once each", async t => {
   const posts: { url: string; body: string }[] = [];
   const dir = await home(t, posts);
-  for (let i = 0; i < 4; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login", category: "bug" });
-  for (let i = 0; i < 2; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login", category: "bug" });
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login", category: "bug" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login", category: "bug" });
+  seedOpen(dir);
   const store = openStore(dir);
   t.after(() => store.close());
-  store.db.prepare("INSERT INTO promises (topic, due, owner, status) VALUES ('login', '2026-09-26', 'mem_ana', 'open')").run();
-  const now = () => new Date("2026-10-04T00:00:00.000Z");
+  const now = () => checkAt;
   await runPromiseChecks(store, now(), { now, fetch: async (input, init) => {
     posts.push({ url: String(input), body: String(init?.body ?? "") });
     return Response.json({ uid: "msg" });
@@ -209,11 +305,36 @@ test("promise results go to the role group and owner DM once each", async t => {
     posts.push({ url: String(input), body: String(init?.body ?? "") });
     return Response.json({ uid: "msg" });
   } });
-  const dm = posts.filter(row => row.url.includes("/chats/cht_dm/messages"));
+  const dmPosts = posts.filter(row => row.url.includes("/chats/cht_dm/messages"));
   const role = posts.filter(row => row.url.includes("/chats/cht_engenharia/messages"));
-  assert.equal(dm.length, 1);
+  assert.equal(dmPosts.length, 1);
   assert.equal(role.length, 1);
-  assert.match(dm[0].body, /resolvida/);
-  assert.equal(dm[0].body.includes("plow"), false);
-  assert.equal(role[0].url.includes("cht_engenharia"), true);
+  assert.match(dmPosts[0].body, /resolvida/);
+  assert.equal(dmPosts[0].body.includes("plow"), false);
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "resolvida");
+});
+
+test("PAUSE keeps the promise open so the role group is retried after resume", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login", category: "bug" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login", category: "bug" });
+  seedOpen(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  store.db.prepare("UPDATE flags SET paused = 1 WHERE id = 1").run();
+  const now = () => checkAt;
+  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+    posts.push({ url: String(input), body: String(init?.body ?? "") });
+    return Response.json({ uid: "msg" });
+  };
+  await runPromiseChecks(store, now(), { now, fetch: fetchImpl });
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "open");
+  assert.equal(posts.filter(row => row.url.includes("/chats/cht_dm/messages")).length, 1);
+  assert.equal(posts.filter(row => row.url.includes("/chats/cht_engenharia/messages")).length, 0);
+  store.db.prepare("UPDATE flags SET paused = 0 WHERE id = 1").run();
+  await runPromiseChecks(store, now(), { now, fetch: fetchImpl });
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "resolvida");
+  assert.equal(posts.filter(row => row.url.includes("/chats/cht_dm/messages")).length, 1);
+  assert.equal(posts.filter(row => row.url.includes("/chats/cht_engenharia/messages")).length, 1);
 });
