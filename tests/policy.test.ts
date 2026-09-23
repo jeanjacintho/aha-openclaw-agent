@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import entry from "../plugin/index.ts";
+import { saveConfig } from "../aha/config.ts";
+import { checkPolicy, POLICY } from "../aha/responder/policy.ts";
+import { type Draft } from "../aha/responder/drafts.ts";
+import { openStore } from "../aha/store/db.ts";
 
 for (const mode of ["full", "discovery", "tool-discovery"]) test(`${mode} exposes Plow tools without a tool-call gate`, async () => {
   const names: string[] = [];
@@ -11,7 +18,7 @@ for (const mode of ["full", "discovery", "tool-discovery"]) test(`${mode} expose
     registerTool(factory: (context: object) => { name: string }) { names.push(factory({}).name); },
     on(name: string) { hooks.push(name); },
   });
-  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask"]);
+  assert.deepEqual(names, ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill", "aha_digest_now", "aha_role_assign", "aha_role_groups_create", "aha_claim", "aha_ask", "aha_approve", "aha_edit", "aha_ignore", "aha_not_us", "aha_logs", "aha_pause", "aha_resume"]);
   const manifest = JSON.parse(await readFile(new URL("../plugin/openclaw.plugin.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.contracts.tools, names);
   assert.ok(!hooks.includes("before_tool_call"));
@@ -106,4 +113,111 @@ test("heartbeat owner discovery identifies only the sentinel as a direct destina
     registerChannel(value: { plugin: typeof channel }) { channel = value.plugin; } });
   assert.equal(channel!.messaging.inferTargetChatType?.({ to: "plow-owner" }), "direct");
   assert.equal(channel!.messaging.inferTargetChatType?.({ to: "cht_unknown" }), undefined);
+});
+
+async function policyHome(t: import("node:test").TestContext) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-policy-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = openStore(dir);
+  t.after(() => store.close());
+  saveConfig(store, { company: { name: "Plow", aliases: ["plow"] }, links: ["https://news.ycombinator.com/item?id=1"] });
+  return store;
+}
+
+function seedItem(store: ReturnType<typeof openStore>, over: {
+  body?: string;
+  about?: string;
+  category?: string;
+  topic?: string;
+  confidence?: number;
+  question?: number;
+  source?: string;
+  externalId?: string;
+} = {}) {
+  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
+    VALUES (?, ?, 'https://news.ycombinator.com/item?id=1', 'a', 't', ?, '2026-09-22T00:00:00.000Z', '2026-09-22T00:00:00.000Z', 'relevant')`)
+    .run(over.source ?? "hn", over.externalId ?? String(Math.random()), over.body ?? "Does plow queue jobs?");
+  const id = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, ?, ?, 'en', ?, 'low', ?, ?)`)
+    .run(id, over.category ?? "question", over.topic ?? "queues", over.question ?? 1, over.about ?? "self", over.confidence ?? 0.9);
+  const draft: Draft = {
+    id: 1,
+    itemId: id,
+    body: "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow",
+    state: "pending",
+  };
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(id, draft.body);
+  draft.id = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  return draft;
+}
+
+const now = new Date("2026-09-23T12:00:00.000Z");
+
+test("response policy allows a mention with a valid draft", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store);
+  assert.deepEqual(checkPolicy(store, draft, now), { allow: true });
+});
+
+test("response policy rule 1 fails only when the company is not mentioned and nobody asked for help", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { body: "random thread about tractors", question: 0 });
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.mention]);
+});
+
+test("response policy rule 2 fails only for a competitor item", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { about: "competitor:zonk" });
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.competitor]);
+});
+
+test("response policy rule 3 fails only for a red-line category", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { category: "security" });
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.redLine]);
+});
+
+test("response policy rule 4 fails only when confidence is below 0.8", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { confidence: 0.79 });
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.confidence]);
+});
+
+test("response policy rule 5 fails only when the daily reply limit is full", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { source: "github", externalId: "g1" });
+  for (let i = 0; i < 10; i++) {
+    const source = i < 3 ? "hn" : i < 6 ? "producthunt" : "agent-index";
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', NULL)").run(`post:2026-09-23:${source}:${i}`);
+  }
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("response policy rule 6 fails only when the draft fails the validator", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store);
+  draft.body = "Thanks for asking about Plow. https://evil.example/steal\n— AHA, AI assistant of Plow";
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.validator]);
+});
+
+test("response policy rule 7 fails only when PAUSE is active", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store);
+  store.db.prepare("UPDATE flags SET paused = 1").run();
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.paused]);
 });
