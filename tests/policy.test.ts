@@ -182,6 +182,16 @@ test("response policy rule 3 fails only for a red-line category", async t => {
   const result = checkPolicy(store, draft, now);
   assert.equal(result.allow, false);
   if (!result.allow) assert.deepEqual(result.reasons, [POLICY.redLine]);
+  assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(draft.itemId) as { state: string }).state, "escalated");
+});
+
+test("response policy rule 3 fails only for a red-line topic such as imprensa", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { topic: "imprensa" });
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.redLine]);
+  assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(draft.itemId) as { state: string }).state, "escalated");
 });
 
 test("response policy rule 4 fails only when confidence is below 0.8", async t => {
@@ -199,6 +209,26 @@ test("response policy rule 5 fails only when the daily reply limit is full", asy
     const source = i < 3 ? "hn" : i < 6 ? "producthunt" : "agent-index";
     store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', NULL)").run(`post:2026-09-23:${source}:${i}`);
   }
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("response policy rule 5 fails only when the community daily limit is full", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { source: "hn", externalId: "fresh" });
+  for (let i = 0; i < 3; i++) {
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', NULL)").run(`post:2026-09-23:hn:${i}`);
+  }
+  const result = checkPolicy(store, draft, now);
+  assert.equal(result.allow, false);
+  if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("response policy rule 5 fails only when the thread already has a reply", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store, { source: "hn", externalId: "same-thread" });
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', NULL)").run("thread:hn:same-thread");
   const result = checkPolicy(store, draft, now);
   assert.equal(result.allow, false);
   if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);

@@ -19,6 +19,10 @@ const RED_TOPIC = /imprensa|press|ameaça|threat|saúde|health|política|politic
 const TOTAL_DAY = 10;
 const COMMUNITY_DAY = 3;
 
+export function isRedLine(category: string | null | undefined, topic: string | null | undefined) {
+  return RED_LINE.has(category ?? "") || RED_TOPIC.test(topic ?? "");
+}
+
 type Row = {
   source: string;
   external_id: string;
@@ -65,7 +69,10 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
   const ask = row.is_question === 1 && (row.about ?? "self") === "self";
   if (!mentioned(`${row.title ?? ""} ${row.body ?? ""}`, names) && !ask) reasons.push(POLICY.mention);
   if ((row.about ?? "").startsWith("competitor:")) reasons.push(POLICY.competitor);
-  if (RED_LINE.has(row.category ?? "") || RED_TOPIC.test(row.topic ?? "")) reasons.push(POLICY.redLine);
+  if (isRedLine(row.category, row.topic)) {
+    reasons.push(POLICY.redLine);
+    store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(draft.itemId);
+  }
   if ((row.confidence ?? 0) < 0.8) reasons.push(POLICY.confidence);
   const day = ymd(now);
   const total = countLedger(store, `post:${day}:%`);

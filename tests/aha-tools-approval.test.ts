@@ -25,10 +25,18 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function home(t: import("node:test").TestContext) {
+async function home(t: import("node:test").TestContext, posts: { url: string; body: string }[] = []) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-approve-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
+      posts.push({ url, body: String(init?.body ?? "") });
+      return Response.json({ uid: "msg_ok" });
+    }
+    return new Response("", { status: 404 });
+  });
   const store = openStore(dir);
   saveConfig(store, { company: { name: "Plow" }, ownerChatUid: "cht_dm", links: ["https://news.ycombinator.com/item?id=1"] });
   store.close();
@@ -55,7 +63,7 @@ function tools(ctx: ToolCtx) {
 function seed(dir: string, over: { category?: string } = {}) {
   const store = openStore(dir);
   store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
-    VALUES ('hn', 'ext-1', 'https://news.ycombinator.com/item?id=1', 'a', 'Plow queues', 'Does plow queue jobs?', '2026-09-22T00:00:00.000Z', '2026-09-22T00:00:00.000Z', 'assigned')`).run();
+    VALUES ('hn', ?, 'https://news.ycombinator.com/item?id=1', 'a', 'Plow queues', 'Does plow queue jobs?', '2026-09-22T00:00:00.000Z', '2026-09-22T00:00:00.000Z', 'assigned')`).run(String(Math.random()));
   const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, 0, ?, 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId, over.category ?? "question");
@@ -100,48 +108,92 @@ test("aha_not_us records a negative example used by classify", async t => {
   t.after(() => store.close());
   const row = store.db.prepare("SELECT kind, text FROM feedback_examples WHERE item_id = ?").get(itemId) as { kind: string; text: string };
   assert.equal(row.kind, "negative");
-  assert.match(row.text, new RegExp(`NOT US AHA-${itemId}`));
+  assert.match(row.text, new RegExp(`^NOT US AHA-${itemId}$`));
+  assert.equal(row.text.includes("Plow queues"), false);
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(itemId) as { state: string }).state, "irrelevant");
 });
 
 test("aha_logs returns the item history without the public post body", async t => {
   const dir = await home(t);
-  const { itemId, draftId } = seed(dir);
+  const { itemId } = seed(dir);
   const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
-  await owner.get("aha_approve")!.execute("call", { draftId });
+  await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
   const result = await owner.get("aha_logs")!.execute("call", { id: `AHA-${itemId}` });
   assert.equal(result.isError ?? false, false);
-  const details = result.details as { publicId: string; item: { id: number; body?: string }; drafts: { id: number }[]; ledger: unknown[] };
+  const details = result.details as { publicId: string; item: { id: number; body?: string }; drafts: { id: number; chars?: number; body?: string }[]; classification: { topic?: string } };
   assert.equal(details.publicId, `AHA-${itemId}`);
   assert.equal(details.item.id, itemId);
   assert.equal("body" in details.item, false);
-  assert.equal(details.drafts.length, 1);
+  assert.equal("topic" in (details.classification ?? {}), false);
+  assert.equal("body" in details.drafts[0], false);
+  assert.equal(typeof details.drafts[0].chars, "number");
   assert.equal(JSON.stringify(result.details).includes("Does plow queue jobs?"), false);
+  assert.equal(JSON.stringify(result.details).includes("Thanks for asking"), false);
 });
 
-test("approving an HN draft returns text and a link instead of posting", async t => {
-  const dir = await home(t);
+test("approving sends the reply to the chat and returns only sent:true", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
   const { itemId, draftId } = seed(dir);
   const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
   const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
   assert.equal(result.isError ?? false, false);
-  const details = result.details as { posted: boolean; text: string; url: string; allow: boolean };
-  assert.equal(details.allow, true);
-  assert.equal(details.posted, false);
-  assert.match(details.text, /AI assistant of Plow/);
-  assert.equal(details.url, "https://news.ycombinator.com/item?id=1");
+  assert.deepEqual(result.details, { sent: true });
+  assert.equal(JSON.stringify(result).includes("Thanks for asking"), false);
+  assert.equal(posts.some(row => row.url.includes("/chats/cht_dm/messages") && row.body.includes("AI assistant of Plow")), true);
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT state FROM drafts WHERE id = ?").get(draftId) as { state: string }).state, "approved");
 });
 
+test("AHA-n always names the item, not a draft with the same number", async t => {
+  const dir = await home(t);
+  const decoy = seed(dir, { category: "praise" });
+  const pad = openStore(dir);
+  for (let i = 0; i < 8; i++) {
+    pad.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, 'padding', 'pending')").run(decoy.itemId);
+  }
+  pad.close();
+  const target = seed(dir, { category: "question" });
+  assert.notEqual(target.itemId, target.draftId);
+  const colliding = openStore(dir);
+  const sameNumber = colliding.db.prepare("SELECT item_id AS itemId FROM drafts WHERE id = ?").get(target.itemId) as { itemId: number };
+  colliding.close();
+  assert.notEqual(sameNumber.itemId, target.itemId);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${target.itemId}` });
+  assert.equal(result.isError ?? false, false);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  assert.equal((after.db.prepare("SELECT state FROM drafts WHERE id = ?").get(target.draftId) as { state: string }).state, "approved");
+  assert.equal((after.db.prepare("SELECT state FROM drafts WHERE id = ?").get(target.itemId) as { state: string }).state, "pending");
+});
+
+test("a second approve on the same draft is rejected", async t => {
+  const dir = await home(t);
+  const { itemId } = seed(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const first = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  const second = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  assert.deepEqual(first.details, { sent: true });
+  assert.equal(second.isError, true);
+});
+
+test("the owner can approve an other item that routes to no role", async t => {
+  const dir = await home(t);
+  const { itemId } = seed(dir, { category: "other" });
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  assert.deepEqual(result.details, { sent: true });
+});
+
 test("a produto member cannot approve a marketing draft", async t => {
   const dir = await home(t);
-  const { draftId } = seed(dir, { category: "praise" });
+  const { itemId } = seed(dir, { category: "praise" });
   const store = openStore(dir);
   store.db.prepare("INSERT INTO people_roles (person, role) VALUES ('mem_prod', 'produto')").run();
   store.close();
   const prod = tools({ senderIsOwner: false, requesterSenderId: "mem_prod", nativeChannelId: "cht_produto" });
-  const denied = await prod.get("aha_approve")!.execute("call", { draftId });
+  const denied = await prod.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
   assert.equal(denied.isError, true);
 });

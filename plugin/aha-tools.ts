@@ -1,5 +1,6 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
 import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deliver.ts";
+import { sendToChat } from "../aha/notify/plow.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
@@ -187,20 +188,14 @@ function publicId(value: unknown): number | undefined {
 function canActOnItem(store: Store, ctx: Requester, itemId: number) {
   const row = itemClassification(store, itemId);
   if (!row?.category) return fail("item not found");
+  if (ctx.senderIsOwner) return;
   const roles = routeItem({ category: row.category, urgency: row.urgency });
   const mine = claimRoles(store, ctx);
   if (!roles.some(role => mine.includes(role))) return fail("not a member of this item's role");
 }
 
-function loadDraft(store: Store, draftId: number): Draft | undefined {
-  const row = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE id = ?").get(draftId) as Draft | undefined;
-  return row;
-}
-
-function draftByPublicOrId(store: Store, id: number): Draft | undefined {
-  const byDraft = loadDraft(store, id);
-  if (byDraft) return byDraft;
-  return store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1").get(id) as Draft | undefined;
+function pendingDraftForItem(store: Store, itemId: number): Draft | undefined {
+  return store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1").get(itemId) as Draft | undefined;
 }
 
 export function registerAhaTools(api: {
@@ -525,7 +520,7 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_approve",
     label: "Approve an AHA draft",
-    description: "Approve a pending draft. Owner or a member of the item's role. Public ids look like AHA-12. HN and Product Hunt return text and a link for a human to post.",
+    description: "Approve the pending draft for an item (AHA-n is always the item id). Owner or a member of the item's role. Sends the reply text to this chat; the tool result is only {sent:true}.",
     parameters: {
       type: "object",
       required: ["draftId"],
@@ -539,24 +534,22 @@ export function registerAhaTools(api: {
       if (!id) return fail("draftId is required");
       const store = openStore();
       try {
-        const draft = draftByPublicOrId(store, id);
+        const draft = pendingDraftForItem(store, id);
         if (!draft || draft.state !== "pending") return fail("draft not found");
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
         const now = new Date();
         const policy = checkPolicy(store, draft, now);
-        if (!policy.allow) return ok({ allow: false, reasons: policy.reasons });
-        store.db.prepare("UPDATE drafts SET state = 'approved' WHERE id = ? AND state = 'pending'").run(draft.id);
+        if (!policy.allow) return ok({ sent: false, reason: policy.reasons.join("; ") });
+        const claimed = store.db.prepare("UPDATE drafts SET state = 'approved' WHERE id = ? AND state = 'pending'").run(draft.id);
+        if (claimed.changes !== 1) return fail("draft is not claimable");
         recordReady(store, draft, now);
-        const item = store.db.prepare("SELECT source, url FROM items WHERE id = ?").get(draft.itemId) as { source: string; url: string | null };
-        return ok({
-          allow: true,
-          publicId: `AHA-${draft.itemId}`,
-          draftId: draft.id,
-          posted: false,
-          text: draft.body,
-          url: item.url,
-        });
+        const chat = ctx.nativeChannelId;
+        if (!chat) return fail("missing chat");
+        const item = store.db.prepare("SELECT url FROM items WHERE id = ?").get(draft.itemId) as { url: string | null };
+        const text = `${draft.body}${item.url ? `\n${item.url}` : ""}`;
+        const result = await sendToChat(chat, text, `approve:${draft.id}`, { store });
+        return ok(digestSendReply(result));
       } finally {
         store.close();
       }
@@ -585,7 +578,7 @@ export function registerAhaTools(api: {
       if (!text.trim()) return fail("text is required");
       const store = openStore();
       try {
-        const draft = draftByPublicOrId(store, id);
+        const draft = pendingDraftForItem(store, id);
         if (!draft || draft.state !== "pending") return fail("draft not found");
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
@@ -631,12 +624,11 @@ export function registerAhaTools(api: {
       if (!reason) return fail("reason is required");
       const store = openStore();
       try {
-        const draft = draftByPublicOrId(store, id);
+        const draft = pendingDraftForItem(store, id);
         if (!draft || draft.state !== "pending") return fail("draft not found");
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
         store.db.prepare("UPDATE drafts SET state = 'ignored' WHERE id = ? AND state = 'pending'").run(draft.id);
-        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'ignore', ?)").run(draft.itemId, `AHA-${draft.itemId} ${reason}`);
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, ignored: true });
       } finally {
         store.close();
@@ -663,8 +655,7 @@ export function registerAhaTools(api: {
       try {
         const blocked = canActOnItem(store, ctx, itemId);
         if (blocked) return blocked;
-        const title = (store.db.prepare("SELECT title FROM items WHERE id = ?").get(itemId) as { title: string | null } | undefined)?.title ?? "";
-        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'negative', ?)").run(itemId, `NOT US AHA-${itemId} ${title}`.trim().slice(0, 200));
+        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'negative', ?)").run(itemId, `NOT US AHA-${itemId}`);
         store.db.prepare("UPDATE items SET state = 'irrelevant' WHERE id = ?").run(itemId);
         return ok({ itemId, publicId: `AHA-${itemId}`, recorded: true });
       } finally {
@@ -694,8 +685,8 @@ export function registerAhaTools(api: {
         if (blocked) return blocked;
         const item = store.db.prepare("SELECT id, source, external_id, url, state, assignee, fetched_at FROM items WHERE id = ?").get(itemId);
         if (!item) return fail("item not found");
-        const classification = store.db.prepare("SELECT category, urgency, about, confidence, topic, language, is_question FROM classifications WHERE item_id = ?").get(itemId) ?? null;
-        const drafts = store.db.prepare("SELECT id, state, body FROM drafts WHERE item_id = ? ORDER BY id").all(itemId);
+        const classification = store.db.prepare("SELECT category, urgency, about, confidence, language, is_question FROM classifications WHERE item_id = ?").get(itemId) ?? null;
+        const drafts = store.db.prepare("SELECT id, state, length(body) AS chars FROM drafts WHERE item_id = ? ORDER BY id").all(itemId);
         const feedback = store.db.prepare("SELECT id, kind FROM feedback_examples WHERE item_id = ? ORDER BY id").all(itemId);
         const ident = store.db.prepare("SELECT source, external_id FROM items WHERE id = ?").get(itemId) as { source: string; external_id: string };
         const ledger = store.db.prepare("SELECT key, state, url FROM ledger WHERE key LIKE ? OR key = ?").all(`post:%:${ident.source}:${ident.external_id}`, `thread:${ident.source}:${ident.external_id}`);

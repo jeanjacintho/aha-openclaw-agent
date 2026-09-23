@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { draftReply, stripOffListLinks, validateReply } from "../aha/responder/drafts.ts";
+import { draftAndNotify, draftReply, keepLink, stripOffListLinks, validateReply } from "../aha/responder/drafts.ts";
 import { openStore } from "../aha/store/db.ts";
 
 async function home(t: import("node:test").TestContext) {
@@ -37,11 +37,31 @@ test("the validator removes links that are not on the owner's list", () => {
   assert.match(text, /plow\.example\/docs\/ok/);
 });
 
-test("the validator refuses a deadline or price promise", () => {
-  const result = validateReply("We will ship in 3 days for $99", {
-    company: "Plow", lang: "en", url: null, links: [],
-  });
-  assert.equal(result.ok, false);
+test("the validator refuses prefix, userinfo, and schemeless off-list links", () => {
+  const allowed = ["https://plow.co/docs"];
+  assert.equal(keepLink("https://plow.co.evil.com/login", allowed), false);
+  assert.equal(keepLink("https://plow.co@evil.com/login", allowed), false);
+  assert.equal(keepLink("https://plow.co/docs/ok", allowed), true);
+  const prefix = validateReply("See https://plow.co.evil.com/login thanks", { company: "Plow", lang: "en", url: null, links: allowed }, "strict");
+  assert.equal(prefix.ok, false);
+  const userinfo = validateReply("See https://plow.co@evil.com/login thanks", { company: "Plow", lang: "en", url: null, links: allowed }, "strict");
+  assert.equal(userinfo.ok, false);
+  const bare = validateReply("Visit evil.com/login thanks", { company: "Plow", lang: "en", url: null, links: allowed }, "strict");
+  assert.equal(bare.ok, false);
+  const www = validateReply("Visit www.evil.com thanks", { company: "Plow", lang: "en", url: null, links: allowed }, "strict");
+  assert.equal(www.ok, false);
+});
+
+test("the validator refuses expanded price and deadline promises", () => {
+  const ctx = { company: "Plow", lang: "en" as const, url: null, links: [] };
+  for (const body of ["$9 per month", "within 2 days", "next week", "50% off, guaranteed"]) {
+    assert.equal(validateReply(body, ctx).ok, false, body);
+  }
+});
+
+test("the validator sends unknown and mixed languages to review", () => {
+  assert.equal(validateReply("Obrigado! We are on it.", { company: "Plow", lang: "pt", url: null }).ok, false);
+  assert.equal(validateReply("Gracias por escribir", { company: "Plow", lang: "es", url: null }).ok, false);
 });
 
 test("the validator requires the language of the original post", () => {
@@ -91,4 +111,34 @@ test("a competitor item never gets a draft", async t => {
   );
   assert.equal(called, 0);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts").get() as { n: number }).n, 0);
+});
+
+test("the worker drafts an eligible item and sends AHA-n to the role group", async t => {
+  const store = await home(t);
+  const prevBase = process.env.PLOW_API_BASE;
+  const prevTok = process.env.PLOW_AGENT_TOKEN;
+  process.env.PLOW_API_BASE = "http://plow.test";
+  process.env.PLOW_AGENT_TOKEN = "tok";
+  t.after(() => {
+    if (prevBase === undefined) delete process.env.PLOW_API_BASE; else process.env.PLOW_API_BASE = prevBase;
+    if (prevTok === undefined) delete process.env.PLOW_AGENT_TOKEN; else process.env.PLOW_AGENT_TOKEN = prevTok;
+  });
+  saveConfig(store, {
+    company: { name: "Plow" },
+    language: "en",
+    links: ["https://plow.example/docs"],
+    ownerChatUid: "cht_dm",
+    roleChats: { marketing: "cht_marketing" },
+  });
+  const itemId = insertItem(store);
+  const posts: { url: string; body: string }[] = [];
+  await draftAndNotify(store, {
+    complete: async () => ({ ok: true, value: { body: "Thanks for asking about Plow queues." } }),
+    fetch: async (input, init) => {
+      posts.push({ url: String(input), body: String(init?.body ?? "") });
+      return Response.json({ uid: "msg_draft" });
+    },
+  });
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts").get() as { n: number }).n, 1);
+  assert.equal(posts.some(row => row.url.includes("/chats/cht_marketing/messages") && row.body.includes(`AHA-${itemId}`)), true);
 });
