@@ -220,7 +220,29 @@ test("checkPromises marks a 50% drop without high urgency as resolvida", async t
   assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "open");
 });
 
-test("checkPromises returns sem sinal when either window has fewer than 3 items", async t => {
+for (const row of [
+  { before: 10, after: 0, want: "resolvida" },
+  { before: 4, after: 1, want: "resolvida" },
+  { before: 2, after: 1, want: "sem sinal" },
+  { before: 2, after: 5, want: "sem sinal" },
+  { before: 6, after: 3, want: "resolvida" },
+  { before: 3, after: 3, want: "persiste" },
+] as const) {
+  test(`checkPromises ${row.before}->${row.after} is ${row.want}`, async t => {
+    const dir = await home(t);
+    for (let i = 0; i < row.before; i++) mention(dir, { ext: `b${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login" });
+    for (let i = 0; i < row.after; i++) mention(dir, { ext: `a${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login" });
+    seedOpen(dir);
+    const store = openStore(dir);
+    t.after(() => store.close());
+    const result = checkPromises(store, checkAt)[0];
+    assert.equal(result.before, row.before);
+    assert.equal(result.after, row.after);
+    assert.equal(result.result, row.want);
+  });
+}
+
+test("checkPromises returns sem sinal when the before window has fewer than 3 items", async t => {
   const dir = await home(t);
   mention(dir, { ext: "b0", published: "2026-09-22T00:00:00.000Z", topic: "login" });
   mention(dir, { ext: "b1", published: "2026-09-23T00:00:00.000Z", topic: "login" });

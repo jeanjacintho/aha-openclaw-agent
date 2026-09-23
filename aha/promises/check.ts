@@ -68,7 +68,7 @@ export function checkPromises(store: Store, now: Date): PromiseResult[] {
     const before = windowCounts(store, row.topic, new Date(due.getTime() - WINDOW_DAYS * DAY_MS), due);
     const after = windowCounts(store, row.topic, due, new Date(due.getTime() + WINDOW_DAYS * DAY_MS));
     let result: PromiseResult["result"];
-    if (before.count < 3 || after.count < 3) result = "sem sinal";
+    if (before.count < 3) result = "sem sinal";
     else if (after.count <= before.count * 0.5 && !after.high) result = "resolvida";
     else result = "persiste";
     results.push({
