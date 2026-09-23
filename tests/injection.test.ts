@@ -233,7 +233,9 @@ for (const attack of attacks) test(`injection ${attack.name} cannot drive aha_* 
   const ahaTools = [...map.keys()].filter(name => name.startsWith("aha_"));
   assert.ok(ahaTools.length >= 20, `expected every aha_* tool, got ${ahaTools.join(",")}`);
   for (const name of ahaTools) {
-    await map.get(name)!.execute("call", argsFor(name, item.id, attack.body));
+    const result = await map.get(name)!.execute("call", argsFor(name, item.id, attack.body));
+    const blob = JSON.stringify(result);
+    assert.equal(blob.includes(attack.body), false, `${name} leaked the post body`);
   }
   const cfg = getConfig(store);
   assert.equal(cfg?.company.name, "Plow");
@@ -247,4 +249,31 @@ for (const attack of attacks) test(`injection ${attack.name} cannot drive aha_* 
   assert.equal(digest.includes("evil.example"), false);
   const quoted = [...digest.matchAll(/: ([^\n]+)/g)].map(match => match[1]);
   for (const excerpt of quoted) assert.ok(excerpt.replace(/ https?:\S+$/, "").length <= 220);
+});
+
+test("aha_* tools deny a non-owner with no role", async t => {
+  await home(t);
+  const byName = new Map<string, Tool>();
+  const plow = { apiBase: "http://plow.test", lineUid: "line", accountId: "chat" };
+  entry.register({
+    registrationMode: "full",
+    runtime: {},
+    logger: { info() {} },
+    on() {},
+    registerChannel() {},
+    registerTool(factory: (context: object) => Tool) {
+      const tool = factory({
+        senderIsOwner: false,
+        nativeChannelId: "cht_x",
+        config: { channels: { plow } },
+      });
+      byName.set(tool.name, tool);
+    },
+  });
+  const ahaTools = [...byName.keys()].filter(name => name.startsWith("aha_"));
+  assert.ok(ahaTools.length >= 20);
+  for (const name of ahaTools) {
+    const result = await byName.get(name)!.execute("call", argsFor(name, 1, "x"));
+    assert.equal(result.isError, true, `${name} must be denied`);
+  }
 });

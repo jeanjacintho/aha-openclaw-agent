@@ -766,8 +766,10 @@ export function registerAhaTools(api: {
       if (!urlOrAuthor) return fail("urlOrAuthor is required");
       const store = openStore();
       try {
-        const deleted = forgetByUrlOrAuthor(store, urlOrAuthor);
-        return ok({ deleted, urlOrAuthor });
+        const deleted = forgetByUrlOrAuthor(store, urlOrAuthor, {
+          actor: ctx.requesterSenderId || "owner",
+        });
+        return ok({ deleted });
       } finally {
         store.close();
       }

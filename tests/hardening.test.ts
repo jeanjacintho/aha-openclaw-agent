@@ -5,11 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { classifyNewItems } from "../aha/digest/deliver.ts";
+import { draftAndNotify, draftReply } from "../aha/responder/drafts.ts";
 import { runIngest } from "../aha/pipeline/ingest.ts";
 import { openStore } from "../aha/store/db.ts";
 import { RETENTION_DAYS, forgetByUrlOrAuthor, pruneExpired } from "../aha/store/retention.ts";
 import { recordUsage } from "../aha/usage/ledger.ts";
-import { classifyAllowed } from "../aha/usage/budget.ts";
+import { classifyAllowed, DEFAULT_DAILY_TOKEN_BUDGET, llmAllowed } from "../aha/usage/budget.ts";
 import entry from "../plugin/index.ts";
 import { type SourceAdapter } from "../aha/sources/types.ts";
 
@@ -105,17 +106,95 @@ test("the owner is warned once at 80% of the token budget", async t => {
   assert.equal(posts.filter(body => body.includes("Token budget at")).length, 1);
 });
 
-test("items older than 90 days are pruned", async t => {
+test("the owner is warned separately at 100% of the token budget", async t => {
+  const store = await home(t);
+  insertItem(store);
+  recordUsage({ at: new Date("2026-09-23T10:00:00.000Z"), model: "z-ai/glm-5.2", input: 8, output: 2, purpose: "classify" });
+  const posts: string[] = [];
+  await classifyNewItems(store, {
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    complete: async () => ({ ok: true, value: { results: [] } }),
+    fetch: async (input, init) => {
+      if (String(input).includes("/messages")) {
+        posts.push(String(init?.body ?? ""));
+        return Response.json({ uid: "msg" });
+      }
+      return new Response("", { status: 404 });
+    },
+  });
+  assert.equal(posts.filter(body => body.includes("Token budget at")).length, 1);
+  assert.equal(posts.filter(body => body.includes("Token budget exhausted (100%)")).length, 1);
+});
+
+test("the default daily token budget is two million tokens", () => {
+  assert.equal(DEFAULT_DAILY_TOKEN_BUDGET, 2_000_000);
+});
+
+test("draftReply and draftAndNotify stop calling the LLM at 100% of the token budget", async t => {
+  const store = await home(t);
+  saveConfig(store, { company: { name: "Plow", aliases: ["plow"] }, ownerChatUid: "cht_dm", language: "en", links: ["https://plow.example/docs"] });
+  const itemId = insertItem(store, { state: "relevant" });
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId);
+  recordUsage({ at: new Date("2026-09-23T10:00:00.000Z"), model: "z-ai/glm-5.2", input: 8, output: 2, purpose: "classify" });
+  assert.equal(llmAllowed(store, new Date("2026-09-23T12:00:00.000Z")), false);
+  let called = 0;
+  await assert.rejects(
+    () => draftReply(store, itemId, {
+      now: () => new Date("2026-09-23T12:00:00.000Z"),
+      complete: async () => {
+        called += 1;
+        return { ok: true, value: { body: "Thanks for asking about queues." } };
+      },
+    }),
+    /token budget exhausted/,
+  );
+  await draftAndNotify(store, {
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    complete: async () => {
+      called += 1;
+      return { ok: true, value: { body: "Thanks for asking about queues." } };
+    },
+  });
+  assert.equal(called, 0);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts").get() as { n: number }).n, 0);
+});
+
+test("items older than 90 days are pruned unless they have a pending draft or are assigned or escalated", async t => {
   const store = await home(t);
   const oldId = insertItem(store, { fetched: "2026-06-01T00:00:00.000Z", externalId: "old" });
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(oldId);
+  const assignedId = insertItem(store, { fetched: "2026-06-01T00:00:00.000Z", externalId: "assigned", state: "assigned" });
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(assignedId);
+  const pendingId = insertItem(store, { fetched: "2026-06-01T00:00:00.000Z", externalId: "pending", state: "relevant" });
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(pendingId);
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(pendingId, "Rascunho AHA pending");
   const kept = insertItem(store, { fetched: "2026-09-20T00:00:00.000Z", externalId: "new" });
   const removed = pruneExpired(store, new Date("2026-09-23T00:00:00.000Z"));
-  assert.equal(removed, 1);
+  assert.equal(removed, 3);
   assert.equal(RETENTION_DAYS, 90);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(oldId), undefined);
   assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(kept));
+  const assigned = store.db.prepare("SELECT id, state, body, title, author FROM items WHERE id = ?").get(assignedId) as {
+    id: number; state: string; body: string; title: string; author: string;
+  };
+  assert.equal(assigned.state, "assigned");
+  assert.equal(assigned.body, "");
+  assert.equal(assigned.title, "");
+  assert.equal(assigned.author, "");
+  const classification = store.db.prepare("SELECT topic, category FROM classifications WHERE item_id = ?").get(assignedId) as {
+    topic: string; category: string;
+  };
+  assert.equal(classification.topic, "queues");
+  assert.equal(classification.category, "question");
+  const pending = store.db.prepare("SELECT id, state, body FROM items WHERE id = ?").get(pendingId) as { id: number; state: string; body: string };
+  assert.equal(pending.state, "relevant");
+  assert.equal(pending.body, "");
+  assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).body, "");
+  assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).state, "pending");
 });
 
 test("forget by url or author removes that post", async t => {
@@ -128,6 +207,34 @@ test("forget by url or author removes that post", async t => {
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(byUrl), undefined);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(byAuthor), undefined);
   assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(other));
+});
+
+test("forget normalizes URLs and authors, overwrites deleted bytes, and writes an audit row", async t => {
+  const store = await home(t);
+  const slash = insertItem(store, { url: "https://news.ycombinator.com/item?id=77/", externalId: "77" });
+  const ph = insertItem(store, { url: "https://www.producthunt.com/posts/plow#comment-9", externalId: "ph" });
+  const cased = insertItem(store, { author: "Mallory", url: "https://news.ycombinator.com/item?id=78", externalId: "78" });
+  const other = insertItem(store, { author: "bob", url: "https://news.ycombinator.com/item?id=79", externalId: "79" });
+  assert.equal((store.db.prepare("PRAGMA secure_delete").get() as { secure_delete: number }).secure_delete, 1, "secure_delete");
+  assert.equal(forgetByUrlOrAuthor(store, "http://news.ycombinator.com/item?id=77", { actor: "plow-owner", at: new Date("2026-09-23T12:00:00.000Z") }), 1, "hn trailing slash");
+  assert.equal(forgetByUrlOrAuthor(store, "https://producthunt.com/posts/plow", { actor: "plow-owner" }), 1, "ph fragment");
+  assert.equal(forgetByUrlOrAuthor(store, "MALLORY", { actor: "plow-owner" }), 1, "author case");
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(slash), undefined);
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(ph), undefined);
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(cased), undefined);
+  assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(other));
+  const audits = store.db.prepare("SELECT target_hash, at, actor, deleted FROM forget_audit ORDER BY id").all() as {
+    target_hash: string; at: string; actor: string; deleted: number;
+  }[];
+  assert.equal(audits.length, 3);
+  assert.equal(audits[0].actor, "plow-owner");
+  assert.equal(audits[0].deleted, 1);
+  assert.equal(audits[0].at, "2026-09-23T12:00:00.000Z");
+  assert.match(audits[0].target_hash, /^[a-f0-9]{64}$/);
+  const blob = JSON.stringify(audits);
+  assert.equal(blob.includes("mallory"), false);
+  assert.equal(blob.includes("producthunt.com"), false);
+  assert.equal(blob.includes("news.ycombinator.com"), false);
 });
 
 test("aha_forget is owner-only", async t => {

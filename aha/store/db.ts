@@ -8,7 +8,7 @@ export type Store = {
   close(): void;
 };
 
-const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql", "006_draft_edited.sql"];
+const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql", "006_draft_edited.sql", "007_forget_audit.sql"];
 const BUSY_MS = 5000;
 
 function defaultMigrations() {
@@ -77,6 +77,7 @@ export function openStore(home = ahaHome(), migrations = defaultMigrations()): S
   db.exec("PRAGMA busy_timeout = 5000");
   execWhenFree(db, "PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA secure_delete = ON");
   migrate(db, migrations);
   return {
     db,

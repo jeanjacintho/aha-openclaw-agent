@@ -4,6 +4,7 @@ import { draftSystemPrompt } from "../llm/prompts.ts";
 import { sendToChat, type SendDeps } from "../notify/plow.ts";
 import { routeItem, type Role } from "../pipeline/route.ts";
 import { type Store } from "../store/db.ts";
+import { llmAllowed } from "../usage/budget.ts";
 import { itemAutonomy } from "./autonomy.ts";
 import { checkPolicy } from "./policy.ts";
 import { postReply } from "./post.ts";
@@ -66,6 +67,8 @@ function loadItem(store: Store, itemId: number): ItemContext | undefined {
 export async function draftReply(store: Store, itemId: number, deps: DraftDeps = {}): Promise<Draft> {
   const cfg = getConfig(store);
   if (!cfg) throw new Error("setup is required");
+  const now = deps.now?.() ?? new Date();
+  if (!llmAllowed(store, now)) throw new Error("token budget exhausted");
   const item = loadItem(store, itemId);
   if (!item) throw new Error("item not found");
   if (itemAutonomy(store, item.about, item.source, item.category ?? "other") === "L0") throw new Error("competitor items do not get a draft");
@@ -167,6 +170,7 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
       await notifyChats(store, cfg, roles.length ? roles : ["founder"], text, "escalate", row.id, deps);
       continue;
     }
+    if (!llmAllowed(store, now)) continue;
     try {
       const draft = await draftReply(store, row.id, deps);
       if (itemAutonomy(store, row.about, row.source, row.category ?? "other") === "L2") {
