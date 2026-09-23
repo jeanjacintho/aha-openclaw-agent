@@ -12,7 +12,9 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
 }
 
 test("startAha creates AHA_HOME and returns a stop handle", async t => {
-  const home = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "aha-home-")), "state");
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "aha-home-"));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, "state");
   env(t, { AHA_HOME: home });
   const logs: string[] = [];
   t.mock.method(console, "log", (line: string) => { logs.push(line); });
@@ -34,4 +36,5 @@ test("a failure inside the worker does not propagate", async t => {
   t.mock.method(console, "error", (line: string) => { errors.push(String(line)); });
   assert.equal(startAha(), undefined);
   assert.equal(errors.length, 1);
+  assert.match(errors[0], /^aha: worker standing down: /);
 });
