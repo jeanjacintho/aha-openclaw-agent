@@ -5,6 +5,11 @@ export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
 }
 
+// Spec §7: bug/security → engenharia (+ founder if high); feature_request/
+// comparison → produto; praise/complaint/question → marketing; pricing/legal
+// → founder. "Imprensa" is not a CATEGORIES value. Strong trends are not a
+// category; they are attached to the founder digest only. `other` is not in
+// the table, so it routes nowhere.
 export function routeItem(c: { category: string; urgency?: string | null }): Role[] {
   const high = c.urgency === "high";
   switch (c.category) {
@@ -20,7 +25,6 @@ export function routeItem(c: { category: string; urgency?: string | null }): Rol
       return ["marketing"];
     case "pricing":
     case "legal":
-    case "other":
       return ["founder"];
     default:
       return [];

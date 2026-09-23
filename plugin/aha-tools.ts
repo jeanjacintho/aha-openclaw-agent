@@ -1,13 +1,12 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
 import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deliver.ts";
-import { excerpt } from "../aha/digest/build.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
-import { ownerChat, request, type Account } from "./transport.ts";
+import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
 type PlowChannel = { apiBase?: string; lineUid?: string; emailLineUid?: string; accountId?: string };
@@ -126,26 +125,53 @@ function itemClassification(store: Store, itemId: number) {
 }
 
 function sliceItems(store: Store, role: Role) {
-  const rows = store.db.prepare(`SELECT items.id, items.body, items.url, items.state,
-      classifications.category, classifications.urgency, classifications.topic
+  const rows = store.db.prepare(`SELECT items.id, items.state, classifications.category, classifications.urgency
     FROM items
     JOIN classifications ON classifications.item_id = items.id
     WHERE items.state IN ('relevant', 'assigned')
     ORDER BY items.id`).all() as {
-    id: number; body: string | null; url: string | null; state: string;
-    category: string | null; urgency: string | null; topic: string | null;
+    id: number; state: string; category: string | null; urgency: string | null;
   }[];
-  return rows
+  const items = rows
     .filter(row => routeItem({ category: row.category ?? "other", urgency: row.urgency }).includes(role))
     .map(row => ({
       id: row.id,
       state: row.state,
       category: row.category ?? "other",
       urgency: row.urgency ?? "low",
-      topic: row.topic ?? "",
-      excerpt: excerpt(row.body),
-      url: row.url,
     }));
+  return {
+    items,
+    counts: {
+      relevant: items.filter(item => item.state === "relevant").length,
+      assigned: items.filter(item => item.state === "assigned").length,
+    },
+  };
+}
+
+type MemberEntry = { uid: string; providerKey: string };
+
+async function memberDirectory(account: Account): Promise<MemberEntry[]> {
+  const listing = await request<Page<Chat>>(account, "/chats");
+  if (listing.has_more) throw new Error("Cannot resolve members from a truncated chat listing");
+  const byUid = new Map<string, string>();
+  for (const chat of listing.data ?? []) {
+    for (const person of chat.participants) {
+      if (person.type !== "member" || !person.uid || !person.provider_key) continue;
+      byUid.set(person.uid, person.provider_key);
+    }
+  }
+  return [...byUid.entries()].map(([uid, providerKey]) => ({ uid, providerKey }));
+}
+
+function resolveMember(directory: MemberEntry[], memberUid: string): MemberEntry | undefined {
+  return directory.find(row => row.uid === memberUid || row.providerKey === memberUid);
+}
+
+function claimRoles(store: Store, ctx: Requester): Role[] {
+  const mine = ctx.requesterSenderId ? memberRoles(store, ctx.requesterSenderId) : [];
+  if (ctx.senderIsOwner) return [...ROLES];
+  return mine;
 }
 
 export function registerAhaTools(api: {
@@ -333,10 +359,21 @@ export function registerAhaTools(api: {
       const role = typeof args.role === "string" ? args.role : "";
       if (!memberUid) return fail("memberUid is required");
       if (!isRole(role)) return fail("unknown role");
+      const account = plowAccount(ctx);
+      if (!account) return fail("Plow configuration is unavailable");
+      let person: string;
+      try {
+        const directory = await memberDirectory(account);
+        const resolved = resolveMember(directory, memberUid);
+        if (!resolved) return fail("unknown member");
+        person = resolved.uid;
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "could not list members");
+      }
       const store = openStore();
       try {
-        store.db.prepare("INSERT INTO people_roles (person, role) VALUES (?, ?) ON CONFLICT (person, role) DO NOTHING").run(memberUid, role);
-        return ok({ memberUid, role });
+        store.db.prepare("INSERT INTO people_roles (person, role) VALUES (?, ?) ON CONFLICT (person, role) DO NOTHING").run(person, role);
+        return ok({ memberUid: person, role });
       } finally {
         store.close();
       }
@@ -367,9 +404,16 @@ export function registerAhaTools(api: {
         const cfg = getConfig(store);
         if (!cfg) return fail("setup is required");
         const roleChats = { ...cfg.roleChats };
+        const directory = await memberDirectory(account);
+        const assigned = store.db.prepare("SELECT person, role FROM people_roles").all() as { person: string; role: string }[];
         for (const role of ROLES) {
           if (roleChats[role]) continue;
           const members = [ownerKey];
+          for (const row of assigned.filter(entry => entry.role === role)) {
+            const resolved = resolveMember(directory, row.person);
+            if (!resolved) return fail(`unknown member ${row.person}`);
+            if (!members.includes(resolved.providerKey)) members.push(resolved.providerKey);
+          }
           const body = `Grupo ${role} do AHA`;
           const idempotencyKey = createHash("sha256").update(JSON.stringify([account.lineUid, role, members, body])).digest("hex");
           const chat = await request<{ uid: string }>(account, "/chats", {
@@ -412,10 +456,12 @@ export function registerAhaTools(api: {
         if (!row?.category) return fail("item not found");
         if (row.state !== "relevant") return fail("item is not claimable");
         const roles = routeItem({ category: row.category, urgency: row.urgency });
-        const mine = memberRoles(store, ctx.requesterSenderId!);
+        const mine = claimRoles(store, ctx);
         if (!roles.some(role => mine.includes(role))) return fail("not a member of this item's role");
-        store.db.prepare("UPDATE items SET state = 'assigned' WHERE id = ?").run(itemId);
-        return ok({ itemId, state: "assigned" });
+        const claimed = store.db.prepare("UPDATE items SET state = 'assigned', assignee = ? WHERE id = ? AND state = 'relevant'")
+          .run(ctx.requesterSenderId, itemId);
+        if (claimed.changes !== 1) return fail("item is not claimable");
+        return ok({ itemId, state: "assigned", assignee: ctx.requesterSenderId });
       } finally {
         store.close();
       }
@@ -440,7 +486,7 @@ export function registerAhaTools(api: {
       try {
         const role = roleForChat(getConfig(store), ctx.nativeChannelId);
         if (!role) return fail("this chat is not a role group");
-        return ok({ role, items: sliceItems(store, role) });
+        return ok({ role, ...sliceItems(store, role) });
       } finally {
         store.close();
       }

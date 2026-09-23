@@ -30,7 +30,7 @@ export function renderDigest(m: DigestModel, lang: string): string {
   const heading = pt ? `Resumo ${m.day} (${m.role}) · ${m.readCount} menções lidas` : `Digest ${m.day} (${m.role}) · ${m.readCount} mentions read`;
   const items = m.items.map(item => {
     const url = item.url ? ` ${item.url}` : "";
-    return `• [${item.urgency}] ${item.topic || item.category}: ${item.excerpt}${url}`;
+    return `• [AHA-${item.id}] [${item.urgency}] ${item.topic || item.category}: ${item.excerpt}${url}`;
   });
   return [heading, ...items, ...trends, ...health].join("\n");
 }

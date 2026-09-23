@@ -63,7 +63,7 @@ test("the 24h window includes yesterday UTC when the local digest hour is still 
   const store = await home(t);
   const included = insertItem(store, { id: 1, fetched: "2026-09-22T18:00:00.000Z", body: "in window" });
   classify(store, included, { category: "pricing", urgency: "med", topic: "preço" });
-  const excluded = insertItem(store, { id: 2, fetched: "2026-09-22T11:00:00.000Z", body: "too old" });
+  const excluded = insertItem(store, { id: 2, fetched: "2026-09-20T11:00:00.000Z", body: "too old" });
   classify(store, excluded, { category: "pricing", urgency: "med", topic: "antigo" });
   const localUntil = new Date("2026-09-23T12:00:00.000Z");
   const model = buildDigest(store, "founder", localUntil, "America/Sao_Paulo");
@@ -97,4 +97,12 @@ test("source health uses the last ok window_end after later failures", async t =
   const model = buildDigest(store, "founder", until);
   const text = renderDigest(model, "pt");
   assert.match(text, /HN sem dados desde 2026-09-20 14:00:00 UTC \(limite da API\)/);
+});
+
+test("digest bullets include the item id for claims", async t => {
+  const store = await home(t);
+  const id = insertItem(store, { body: "claim me" });
+  classify(store, id, { category: "pricing", urgency: "high", topic: "preço" });
+  const text = renderDigest(buildDigest(store, "founder", until), "pt");
+  assert.match(text, new RegExp(`\\[AHA-${id}\\]`));
 });
