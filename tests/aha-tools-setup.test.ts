@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { getConfig, saveConfig } from "../aha/config.ts";
+import { deliverDigest, digestNowKey, digestSendReply, scheduledDigestKey } from "../aha/digest/deliver.ts";
 import { readSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
 import { runBackfill } from "../aha/pipeline/backfill.ts";
@@ -247,6 +248,53 @@ test("aha_digest_now classifies, sends to the owner DM, and hides digest text fr
   assert.equal(posts.length, 1);
   assert.match(posts[0].url, /cht_dm\/messages/);
   assert.match(posts[0].body, /secret excerpt/);
+});
+
+test("aha_digest_now does not consume the scheduled daily digest key", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await map.get("aha_setup_save")!.execute("call", setupArgs);
+  assert.deepEqual((await map.get("aha_digest_now")!.execute("call", {})).details, { sent: true });
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const scheduled = await deliverDigest(store);
+  assert.equal(scheduled, "sent");
+  assert.equal(posts.length, 2);
+  const keys = (store.db.prepare("SELECT key FROM deliveries").all() as { key: string }[]).map(row => row.key);
+  assert.equal(keys.filter(key => key.startsWith("digest:now:")).length, 1);
+  assert.equal(keys.filter(key => /^digest:\d{4}-\d{2}-\d{2}:founder$/.test(key)).length, 1);
+});
+
+test("aha_digest_now reports sent:false when delivery is duplicate or uncertain", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await map.get("aha_setup_save")!.execute("call", setupArgs);
+  const at = new Date("2026-09-23T12:00:00.000Z");
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(await deliverDigest(store, { now: () => at, key: digestNowKey(at) }), "sent");
+  assert.equal(await deliverDigest(store, { now: () => at, key: digestNowKey(at) }), "duplicate");
+  assert.deepEqual(digestSendReply("duplicate"), { sent: false, reason: "already sent" });
+  assert.deepEqual(digestSendReply("uncertain"), { sent: false, reason: "uncertain" });
+  assert.equal(scheduledDigestKey("2026-09-23"), "digest:2026-09-23:founder");
+
+  let messages = 0;
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/v1/chats") && method === "GET") return Response.json({ data: [dm, group], has_more: false });
+    if (method === "POST" && url.includes("/messages")) {
+      messages += 1;
+      return new Response("", { status: 500 });
+    }
+    return new Response("", { status: 404 });
+  });
+  const uncertain = await map.get("aha_digest_now")!.execute("call", {});
+  assert.equal(uncertain.isError ?? false, false);
+  assert.deepEqual(uncertain.details, { sent: false, reason: "uncertain" });
+  assert.equal(messages, 1);
 });
 
 test("aha_digest_now is owner-only", async t => {

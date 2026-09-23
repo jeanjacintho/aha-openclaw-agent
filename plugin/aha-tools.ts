@@ -1,5 +1,5 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
-import { deliverDigest } from "../aha/digest/deliver.ts";
+import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deliver.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
@@ -248,16 +248,17 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_digest_now",
     label: "Send the AHA digest now",
-    description: "Classify pending items and send the digest to the owner DM. Owner only. Returns {sent:true} without digest text.",
+    description: "Classify pending items and send the digest to the owner DM. Owner only. Returns {sent:true} without digest text, or {sent:false, reason} if delivery was duplicate or uncertain.",
     parameters: { type: "object", additionalProperties: false, properties: {} },
     async execute() {
       const denied = requireOwner(ctx);
       if (denied) return denied;
       const store = openStore();
       try {
-        const result = await deliverDigest(store);
-        if (result !== "sent" && result !== "duplicate") return fail(`digest ${result}`);
-        return ok({ sent: true });
+        const at = new Date();
+        const result = await deliverDigest(store, { now: () => at, key: digestNowKey(at) });
+        if (result === "failed") return fail("digest failed");
+        return ok(digestSendReply(result));
       } catch (error) {
         return fail(error instanceof Error ? error.message : "digest failed");
       } finally {
