@@ -1,0 +1,32 @@
+{
+  "data": {
+    "repository": {
+      "discussions": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "id": "DISC_1",
+            "title": "How do queues retry?",
+            "url": "https://github.com/plow-pbc/aha/discussions/3",
+            "createdAt": "2026-09-22T08:00:00.000Z",
+            "updatedAt": "2026-09-22T13:00:00.000Z",
+            "body": "Asking about retry backoff.",
+            "author": { "login": "lee" },
+            "comments": {
+              "nodes": [
+                {
+                  "id": "DISC_1c",
+                  "url": "https://github.com/plow-pbc/aha/discussions/3#discussioncomment-1",
+                  "createdAt": "2026-09-22T11:30:00.000Z",
+                  "body": "Exponential, capped at 1h.",
+                  "author": { "login": "kit" },
+                  "replies": { "nodes": [] }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -306,6 +306,8 @@ test("aha_digest_now is owner-only", async t => {
 test("worker and tools share the Agent Index slug", () => {
   assert.equal(agentIndexSlug({ company: { name: "Plow" }, agentIndexSlug: "aha" }), "aha");
   const adapters = watchAdapters({ company: { name: "Plow" }, agentIndexSlug: "aha" }, { github: "tok" });
-  assert.deepEqual(adapters.map(row => row.id), ["hn", "agent-index"]);
+  assert.deepEqual(adapters.map(row => row.id), ["hn", "agent-index", "ph", "github"]);
   assert.equal(adapters[1].enabled({ company: { name: "Plow" } }), true);
+  assert.equal(adapters[2].enabled({ company: { name: "Plow" } }), false);
+  assert.equal(adapters[3].enabled({ company: { name: "Plow" } }), false);
 });

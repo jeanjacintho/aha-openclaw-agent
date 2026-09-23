@@ -1,0 +1,31 @@
+{
+  "data": {
+    "post": {
+      "id": "PH_PLOW",
+      "name": "Plow",
+      "slug": "plow",
+      "url": "https://www.producthunt.com/posts/plow",
+      "comments": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "edges": [
+          {
+            "node": {
+              "id": "PHC_1",
+              "body": "Queues on Plow saved us a week.",
+              "createdAt": "2026-09-22T10:00:00.000Z",
+              "user": { "username": "ada" }
+            }
+          },
+          {
+            "node": {
+              "id": "PHC_old",
+              "body": "Too old for the window.",
+              "createdAt": "2026-09-01T10:00:00.000Z",
+              "user": { "username": "old" }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "id": "ISS_1",
+            "number": 12,
+            "title": "Login hangs on empty token",
+            "url": "https://github.com/plow-pbc/aha/issues/12",
+            "createdAt": "2026-09-22T09:00:00.000Z",
+            "updatedAt": "2026-09-22T12:00:00.000Z",
+            "body": "The login form never returns.",
+            "author": { "login": "nina" },
+            "comments": {
+              "nodes": [
+                {
+                  "id": "ISS_1c",
+                  "url": "https://github.com/plow-pbc/aha/issues/12#issuecomment-1",
+                  "createdAt": "2026-09-22T10:00:00.000Z",
+                  "body": "Reproduced on main.",
+                  "author": { "login": "omar" }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

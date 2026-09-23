@@ -4,6 +4,7 @@ import { type Store } from "./store/db.ts";
 export type AhaConfig = {
   company: { name: string; product?: string; aliases?: string[]; domain?: string; negative?: string[] };
   competitors?: string[];
+  githubRepos?: string[];
   voice?: string;
   language?: string;
   links?: string[];

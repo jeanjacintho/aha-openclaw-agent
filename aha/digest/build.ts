@@ -20,6 +20,18 @@ export type SourceHealth = {
   detail: string | null;
 };
 
+export type CompetitorTopicCount = {
+  competitor: string;
+  topic: string;
+  n: number;
+};
+
+export type CompetitorSummary = {
+  theyWin: CompetitorTopicCount[];
+  theyComplain: CompetitorTopicCount[];
+  weSolved: string[];
+};
+
 export type DigestModel = {
   day: string;
   role: Role;
@@ -27,6 +39,7 @@ export type DigestModel = {
   items: DigestItem[];
   sources: SourceHealth[];
   trends: TrendAlert[];
+  competitors?: CompetitorSummary;
 };
 
 const URGENCY_RANK: Record<string, number> = { high: 0, med: 1, low: 2 };
@@ -96,5 +109,69 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
     LEFT JOIN (SELECT source, MAX(window_end) AS since FROM source_runs WHERE status = 'ok' GROUP BY source) ok
       ON ok.source = r.source
     WHERE r.status != 'ok'`).all() as SourceHealth[];
-  return { day: ymd(until, tz), role, readCount, items: ranked, sources, trends: role === "founder" ? detectTrends(s, until) : [] };
+  return {
+    day: ymd(until, tz),
+    role,
+    readCount,
+    items: ranked,
+    sources,
+    trends: role === "founder" ? detectTrends(s, until) : [],
+    competitors: role === "founder" && isCompetitionDigestDay(until, tz) ? competitorSummary(s, until) : undefined,
+  };
+}
+
+const WEEK_MS = 7 * DAY_MS;
+const COUNTED_STATES = "('relevant', 'assigned', 'escalated')";
+
+export function isCompetitionDigestDay(until: Date, tz = "UTC") {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(until);
+  return weekday === "Mon";
+}
+
+function competitorName(about: string) {
+  return about.startsWith("competitor:") ? about.slice("competitor:".length) : about;
+}
+
+function topicCounts(s: Store, sql: string, params: unknown[]) {
+  return (s.db.prepare(sql).all(...params) as { about: string; topic: string; n: number }[]).map(row => ({
+    competitor: competitorName(row.about),
+    topic: row.topic,
+    n: Number(row.n),
+  }));
+}
+
+export function competitorSummary(s: Store, until: Date): CompetitorSummary {
+  const untilIso = until.toISOString();
+  const weekStart = new Date(until.getTime() - WEEK_MS).toISOString();
+  const theyWin = topicCounts(s, `SELECT classifications.about AS about, classifications.topic AS topic, COUNT(*) AS n
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('praise', 'comparison')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+    GROUP BY classifications.about, classifications.topic
+    ORDER BY n DESC, about ASC, topic ASC`, [weekStart, untilIso]);
+  const theyComplain = topicCounts(s, `SELECT classifications.about AS about, classifications.topic AS topic, COUNT(*) AS n
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('complaint', 'bug')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+    GROUP BY classifications.about, classifications.topic
+    ORDER BY n DESC, about ASC, topic ASC`, [weekStart, untilIso]);
+  const weSolved = (s.db.prepare(`SELECT DISTINCT classifications.topic AS topic
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    JOIN promises ON promises.topic = classifications.topic AND promises.status = 'resolvida'
+    WHERE items.published_at > ? AND items.published_at <= ?
+      AND items.state IN ${COUNTED_STATES}
+      AND classifications.about LIKE 'competitor:%'
+      AND classifications.category IN ('complaint', 'bug')
+      AND classifications.topic IS NOT NULL AND classifications.topic != ''
+    ORDER BY topic ASC`).all(weekStart, untilIso) as { topic: string }[]).map(row => row.topic);
+  return { theyWin, theyComplain, weSolved };
 }

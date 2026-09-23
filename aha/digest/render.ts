@@ -17,11 +17,38 @@ function sourceLine(model: DigestModel, lang: string) {
   });
 }
 
+function countList(rows: { competitor: string; topic: string; n: number }[]) {
+  return rows.map(row => `${row.competitor} ${row.topic} (${row.n})`).join(", ");
+}
+
+function competitorLines(m: DigestModel, lang: string) {
+  const summary = m.competitors;
+  if (!summary) return [];
+  const has = summary.theyWin.length + summary.theyComplain.length + summary.weSolved.length;
+  if (has === 0) return [];
+  const pt = lang.startsWith("pt");
+  const lines = [pt ? "Concorrência (7d, segunda)" : "Competition (7d, Monday)"];
+  if (summary.theyWin.length) {
+    lines.push(pt ? `eles ganham em: ${countList(summary.theyWin)}` : `they win at: ${countList(summary.theyWin)}`);
+  }
+  if (summary.theyComplain.length) {
+    lines.push(pt ? `eles reclamam de: ${countList(summary.theyComplain)}` : `they complain about: ${countList(summary.theyComplain)}`);
+  }
+  if (summary.weSolved.length) {
+    const topics = summary.weSolved.join(", ");
+    lines.push(pt
+      ? `nós já resolvemos: ${topics} (promessa resolvida)`
+      : `we already solved: ${topics} (resolved promise)`);
+  }
+  return lines;
+}
+
 export function renderDigest(m: DigestModel, lang: string): string {
   const pt = lang.startsWith("pt");
   const health = sourceLine(m, lang);
   const trends = m.trends.map(alert => trendSentence(alert, lang));
-  if (m.items.length === 0 && trends.length === 0) {
+  const competitors = competitorLines(m, lang);
+  if (m.items.length === 0 && trends.length === 0 && competitors.length === 0) {
     const line = pt
       ? `Nada que mude decisão hoje. ${m.readCount} menções lidas.`
       : `Nothing that changes a decision today. ${m.readCount} mentions read.`;
@@ -32,5 +59,5 @@ export function renderDigest(m: DigestModel, lang: string): string {
     const url = item.url ? ` ${item.url}` : "";
     return `• [AHA-${item.id}] [${item.urgency}] ${item.topic || item.category}: ${item.excerpt}${url}`;
   });
-  return [heading, ...items, ...trends, ...health].join("\n");
+  return [heading, ...items, ...trends, ...competitors, ...health].join("\n");
 }

@@ -59,6 +59,18 @@ test("filtro 1 skips alias matching for agent-index items regardless of company 
   assert.equal(passesFilter1(negative, zonkCfg), false);
 });
 
+test("filtro 1 keeps competitor names from config", () => {
+  const zonkCfg = { company: { name: "Plow" }, competitors: ["zonk"] };
+  const item = { source: "ph", externalId: "PHC_Z1", url: "https://www.producthunt.com/posts/zonk", author: "a", title: "Zonk", body: "Zonk onboarding is smoother.", publishedAt: now.toISOString() };
+  assert.equal(passesFilter1(item, zonkCfg), true);
+});
+
+test("filtro 1 skips alias matching for github items of the configured repo", () => {
+  const item = { source: "github", externalId: "ISS_1", url: "https://github.com/plow-pbc/aha/issues/12", author: "nina", title: "Login hangs", body: "The form never returns.", publishedAt: now.toISOString() };
+  assert.equal(passesFilter1(item, { company: { name: "Zonk", negative: ["unrelated"] } }), true);
+  assert.equal(passesFilter1({ ...item, body: "This is an unrelated aside." }, { company: { name: "Zonk", negative: ["unrelated"] } }), false);
+});
+
 test("an error on one source does not stop the others", async t => {
   const store = await home(t);
   const report = await runIngest(store, [
