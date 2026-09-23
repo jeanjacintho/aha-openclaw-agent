@@ -126,6 +126,22 @@ test("aha_ask in a marketing group does not return a security item", async t => 
   assert.equal(details.counts.relevant, 1);
 });
 
+test("aha_ask in an engenharia group returns an escalated security item", async t => {
+  const dir = await home(t);
+  const ownerMap = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await ownerMap.get("aha_role_groups_create")!.execute("call", {});
+  const security = insertItem(dir, { category: "security", urgency: "high" });
+  const store = openStore(dir);
+  store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(security);
+  store.close();
+  const ask = tools({ senderIsOwner: false, requesterSenderId: "mem_prod", nativeChannelId: "cht_engenharia" });
+  const result = await ask.get("aha_ask")!.execute("call", { question: "what is escalated" });
+  assert.equal(result.isError ?? false, false);
+  const details = result.details as { items: { id: number; category: string; state: string }[]; counts: { escalated: number } };
+  assert.equal(details.items.some(item => item.id === security && item.state === "escalated"), true);
+  assert.equal(details.counts.escalated, 1);
+});
+
 test("a produto member cannot claim a marketing item", async t => {
   const dir = await home(t);
   const ownerMap = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
