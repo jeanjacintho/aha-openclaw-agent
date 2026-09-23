@@ -1,11 +1,14 @@
 import { getConfig, saveConfig, type AhaConfig } from "../aha/config.ts";
 import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deliver.ts";
+import { excerpt } from "../aha/digest/build.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
+import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
 import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
 import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
-import { openStore } from "../aha/store/db.ts";
-import { ownerChat, type Account } from "./transport.ts";
+import { openStore, type Store } from "../aha/store/db.ts";
+import { ownerChat, request, type Account } from "./transport.ts";
+import { createHash } from "node:crypto";
 
 type PlowChannel = { apiBase?: string; lineUid?: string; emailLineUid?: string; accountId?: string };
 
@@ -100,6 +103,49 @@ function mergeSetup(previous: AhaConfig | null, args: Record<string, unknown>, o
     agentIndexSlug: previous?.agentIndexSlug || process.env.AGENT_ID,
     ownerChatUid,
   };
+}
+
+function memberRoles(store: Store, memberUid: string): Role[] {
+  return (store.db.prepare("SELECT role FROM people_roles WHERE person = ?").all(memberUid) as { role: string }[])
+    .map(row => row.role)
+    .filter(isRole);
+}
+
+function roleForChat(cfg: AhaConfig | null, chatUid: string | undefined): Role | undefined {
+  if (!cfg?.roleChats || !chatUid) return undefined;
+  for (const role of ROLES) {
+    if (cfg.roleChats[role] === chatUid) return role;
+  }
+}
+
+function itemClassification(store: Store, itemId: number) {
+  return store.db.prepare(`SELECT items.state AS state, classifications.category AS category, classifications.urgency AS urgency
+    FROM items
+    LEFT JOIN classifications ON classifications.item_id = items.id
+    WHERE items.id = ?`).get(itemId) as { state: string; category: string | null; urgency: string | null } | undefined;
+}
+
+function sliceItems(store: Store, role: Role) {
+  const rows = store.db.prepare(`SELECT items.id, items.body, items.url, items.state,
+      classifications.category, classifications.urgency, classifications.topic
+    FROM items
+    JOIN classifications ON classifications.item_id = items.id
+    WHERE items.state IN ('relevant', 'assigned')
+    ORDER BY items.id`).all() as {
+    id: number; body: string | null; url: string | null; state: string;
+    category: string | null; urgency: string | null; topic: string | null;
+  }[];
+  return rows
+    .filter(row => routeItem({ category: row.category ?? "other", urgency: row.urgency }).includes(role))
+    .map(row => ({
+      id: row.id,
+      state: row.state,
+      category: row.category ?? "other",
+      urgency: row.urgency ?? "low",
+      topic: row.topic ?? "",
+      excerpt: excerpt(row.body),
+      url: row.url,
+    }));
 }
 
 export function registerAhaTools(api: {
@@ -261,6 +307,140 @@ export function registerAhaTools(api: {
         return ok(digestSendReply(result));
       } catch (error) {
         return fail(error instanceof Error ? error.message : "digest failed");
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_role_assign",
+    label: "Assign an AHA role",
+    description: "Assign a member to founder, produto, marketing, or engenharia. Owner only.",
+    parameters: {
+      type: "object",
+      required: ["memberUid", "role"],
+      additionalProperties: false,
+      properties: {
+        memberUid: { type: "string", minLength: 1 },
+        role: { type: "string", enum: [...ROLES] },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const memberUid = typeof args.memberUid === "string" ? args.memberUid.trim() : "";
+      const role = typeof args.role === "string" ? args.role : "";
+      if (!memberUid) return fail("memberUid is required");
+      if (!isRole(role)) return fail("unknown role");
+      const store = openStore();
+      try {
+        store.db.prepare("INSERT INTO people_roles (person, role) VALUES (?, ?) ON CONFLICT (person, role) DO NOTHING").run(memberUid, role);
+        return ok({ memberUid, role });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_role_groups_create",
+    label: "Create AHA role groups",
+    description: "Start a Plow group per role (plow_start_thread contract: POST /chats) and store each chat uid. Owner only.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const account = plowAccount(ctx);
+      if (!account) return fail("Plow configuration is unavailable");
+      let ownerKey: string;
+      try {
+        const chat = await ownerChat(account);
+        const owner = chat.participants.find(p => p.type === "member" && p.role === "owner");
+        if (owner?.type !== "member" || !owner.provider_key) return fail("The owner's chat has no owner handle");
+        ownerKey = owner.provider_key;
+      } catch {
+        return fail("The owner's chat has no owner handle");
+      }
+      const store = openStore();
+      try {
+        const cfg = getConfig(store);
+        if (!cfg) return fail("setup is required");
+        const roleChats = { ...cfg.roleChats };
+        for (const role of ROLES) {
+          if (roleChats[role]) continue;
+          const members = [ownerKey];
+          const body = `Grupo ${role} do AHA`;
+          const idempotencyKey = createHash("sha256").update(JSON.stringify([account.lineUid, role, members, body])).digest("hex");
+          const chat = await request<{ uid: string }>(account, "/chats", {
+            line_uid: account.lineUid,
+            members,
+            body,
+            trusted: true,
+            idempotency_key: idempotencyKey,
+          });
+          roleChats[role] = chat.uid;
+        }
+        saveConfig(store, { ...cfg, roleChats });
+        return ok({ roleChats });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "could not create role groups");
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_claim",
+    label: "Claim an AHA item",
+    description: "Claim a relevant item for your role. Members of a routed role only. Sets state to assigned.",
+    parameters: {
+      type: "object",
+      required: ["itemId"],
+      additionalProperties: false,
+      properties: { itemId: { type: "integer" } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const itemId = typeof args.itemId === "number" ? args.itemId : Number(args.itemId);
+      if (!Number.isInteger(itemId) || itemId < 1) return fail("itemId is required");
+      const store = openStore();
+      try {
+        const row = itemClassification(store, itemId);
+        if (!row?.category) return fail("item not found");
+        if (row.state !== "relevant") return fail("item is not claimable");
+        const roles = routeItem({ category: row.category, urgency: row.urgency });
+        const mine = memberRoles(store, ctx.requesterSenderId!);
+        if (!roles.some(role => mine.includes(role))) return fail("not a member of this item's role");
+        store.db.prepare("UPDATE items SET state = 'assigned' WHERE id = ?").run(itemId);
+        return ok({ itemId, state: "assigned" });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_ask",
+    label: "Ask about this role's AHA slice",
+    description: "Return store data for the role of the current group. Does not mix other roles' items. Any member in a role group.",
+    parameters: {
+      type: "object",
+      required: ["question"],
+      additionalProperties: false,
+      properties: { question: { type: "string" } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      if (typeof args.question !== "string") return fail("question is required");
+      const store = openStore();
+      try {
+        const role = roleForChat(getConfig(store), ctx.nativeChannelId);
+        if (!role) return fail("this chat is not a role group");
+        return ok({ role, items: sliceItems(store, role) });
       } finally {
         store.close();
       }
