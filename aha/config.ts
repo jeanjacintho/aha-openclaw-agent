@@ -6,6 +6,8 @@ export type AhaConfig = {
   voice?: string;
   language?: string;
   links?: string[];
+  sources?: string[];
+  knowledge?: string;
   digestHour?: number;
   tz?: string;
   ownerChatUid?: string;

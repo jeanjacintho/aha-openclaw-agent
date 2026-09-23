@@ -2,7 +2,7 @@
   "id": "plow",
   "name": "Plow",
   "channels": ["plow"],
-  "contracts": { "tools": ["plow_start_thread"] },
+  "contracts": { "tools": ["plow_start_thread", "aha_setup_save", "aha_secret_set", "aha_status", "aha_backfill"] },
   "activation": { "onStartup": true },
   "configSchema": { "type": "object", "additionalProperties": false },
   "channelConfigs": {
