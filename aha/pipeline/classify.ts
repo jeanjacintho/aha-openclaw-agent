@@ -1,7 +1,7 @@
-import { getConfig } from "../config.ts";
+import { getConfig, type AhaConfig } from "../config.ts";
 import { complete, type CompleteDeps } from "../llm/client.ts";
 import { classifySystemPrompt } from "../llm/prompts.ts";
-import { classifyLlmSchema, parseClassification, type Classification, type ClassifyLlmOut } from "../llm/schemas.ts";
+import { classifyLlmSchema, parseClassification, type Classification } from "../llm/schemas.ts";
 import { type Store } from "../store/db.ts";
 import { stateFromClassification } from "./relevance.ts";
 
@@ -42,6 +42,12 @@ function postsFor(items: ItemRow[]) {
     title: item.title,
     body: item.body,
   }));
+}
+
+function aboutAllowed(about: Classification["about"], cfg: AhaConfig) {
+  if (about === "self") return true;
+  const slug = about.slice("competitor:".length).toLowerCase();
+  return (cfg.competitors ?? []).some(name => name.toLowerCase() === slug);
 }
 
 function review(store: Store, id: number) {
@@ -86,9 +92,11 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
   }, deps);
   const byId = new Map<number, Classification>();
   if (result.ok) {
-    for (const row of (result.value as ClassifyLlmOut).results) {
+    for (const row of result.value.results) {
       try {
-        byId.set(row.id, parseClassification(row));
+        const parsed = parseClassification(row);
+        if (!aboutAllowed(parsed.about, cfg)) continue;
+        byId.set(row.id, parsed);
       } catch {
         /* invalid result stays missing */
       }

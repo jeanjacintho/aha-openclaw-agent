@@ -94,7 +94,11 @@ test("timeout is ok:false", async t => {
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
   const result = await complete(req(), {
     timeoutMs: 20,
-    fetch: async () => new Promise(() => {}),
+    fetch: async (_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        reject(Object.assign(new Error("timeout"), { name: "TimeoutError" }));
+      });
+    }),
   });
   assert.equal(result.ok, false);
   if (result.ok) return;

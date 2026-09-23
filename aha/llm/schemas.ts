@@ -30,9 +30,9 @@ export type Classification = {
   reason: string;
 };
 
-export type ClassifyResult = Classification & { id: number };
+export type ClassifyHit = { id: number } & Record<string, unknown>;
 
-export type ClassifyLlmOut = { results: ClassifyResult[] };
+export type ClassifyLlmOut = { results: ClassifyHit[] };
 
 function fail(message: string): never {
   throw new Error(message);
@@ -80,11 +80,16 @@ function urgency(value: unknown): Classification["urgency"] {
 }
 
 function hasUrl(text: string) {
-  return /:\/\//.test(text) || /\]\s*\(/.test(text);
+  return /:\/\//.test(text) || /\]\s*\(/.test(text) || /www\./i.test(text);
+}
+
+function badTopic(text: string) {
+  return hasUrl(text) || /[\/@]/.test(text) || text.length > 80;
 }
 
 export function parseClassification(input: unknown): Classification {
   const row = asObject(input);
+  const relevant = bool(row.relevant, "relevant");
   const confidence = num(row.confidence, "confidence");
   if (confidence < 0 || confidence > 1) fail("confidence must be between 0 and 1");
   const sentiment = num(row.sentiment, "sentiment");
@@ -92,11 +97,12 @@ export function parseClassification(input: unknown): Classification {
   const topic = str(row.topic, "topic");
   const lang = str(row.lang, "lang");
   const reason = str(row.reason, "reason");
-  if (hasUrl(topic) || hasUrl(lang) || hasUrl(String(row.about ?? ""))) fail("classification fields must not contain URLs");
+  if (badTopic(topic) || hasUrl(lang) || (row.about != null && hasUrl(String(row.about)))) fail("topic must be short text without URLs");
+  const aboutVal = !relevant && (row.about == null || row.about === "") ? "self" : about(row.about);
   return {
-    relevant: bool(row.relevant, "relevant"),
+    relevant,
     confidence,
-    about: about(row.about),
+    about: aboutVal,
     sentiment,
     category: category(row.category),
     topic,
@@ -118,7 +124,7 @@ export const classifyLlmSchema: Schema<ClassifyLlmOut> = {
         const obj = asObject(item);
         const id = num(obj.id, "id");
         if (!Number.isInteger(id)) fail("id must be an integer");
-        return { id, ...parseClassification(obj) };
+        return { ...obj, id };
       }),
     };
   },

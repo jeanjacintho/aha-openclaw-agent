@@ -39,11 +39,36 @@ function headers() {
   };
 }
 
-function timed<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })), timeoutMs);
-    promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
-  });
+function isTimeout(error: unknown) {
+  const err = error as { name?: string; message?: string };
+  return err.name === "TimeoutError" || err.name === "AbortError" || err.message === "timeout";
+}
+
+async function callModel(model: string, req: CompleteRequest<unknown>, deps: CompleteDeps): Promise<ChatResponse> {
+  const http = deps.fetch ?? fetch;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const signal = AbortSignal.timeout(timeoutMs);
+  let response: Response;
+  try {
+    response = await http(apiBase(), {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: req.system },
+          { role: "user", content: wrapPublicPosts(req.data) },
+        ],
+        response_format: { type: "json_object" },
+      }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`http ${response.status}`);
+    return await response.json() as ChatResponse;
+  } catch (error) {
+    if (signal.aborted || isTimeout(error)) throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+    throw error;
+  }
 }
 
 function contentOf(payload: ChatResponse) {
@@ -66,24 +91,6 @@ function tokens(payload: ChatResponse) {
     input: usage.prompt_tokens ?? usage.input ?? 0,
     output: usage.completion_tokens ?? usage.output ?? 0,
   };
-}
-
-async function callModel(model: string, req: CompleteRequest<unknown>, deps: CompleteDeps): Promise<ChatResponse> {
-  const http = deps.fetch ?? fetch;
-  const response = await timed(http(apiBase(), {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: req.system },
-        { role: "user", content: wrapPublicPosts(req.data) },
-      ],
-      response_format: { type: "json_object" },
-    }),
-  }), deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  if (!response.ok) throw new Error(`http ${response.status}`);
-  return await response.json() as ChatResponse;
 }
 
 function record(model: string, purpose: string, payload: ChatResponse) {
