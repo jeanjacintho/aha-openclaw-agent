@@ -4,6 +4,7 @@ import { draftSystemPrompt } from "../llm/prompts.ts";
 import { sendToChat, type SendDeps } from "../notify/plow.ts";
 import { routeItem, type Role } from "../pipeline/route.ts";
 import { type Store } from "../store/db.ts";
+import { autonomyLevel } from "./autonomy.ts";
 
 export type Draft = {
   id: number;
@@ -165,7 +166,7 @@ export async function draftReply(store: Store, itemId: number, deps: DraftDeps =
   if (!cfg) throw new Error("setup is required");
   const item = loadItem(store, itemId);
   if (!item) throw new Error("item not found");
-  if ((item.about ?? "").startsWith("competitor:")) throw new Error("competitor items do not get a draft");
+  if (autonomyLevel(item.about) === "L0") throw new Error("competitor items do not get a draft");
   if (redLine(item.category, item.topic)) {
     store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(itemId);
     throw new Error("red-line items are escalated");
