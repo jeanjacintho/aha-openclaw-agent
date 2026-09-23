@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { ahaHome } from "../worker.ts";
+import { ahaHome } from "../home.ts";
 
 export type Store = {
   db: DatabaseSync;

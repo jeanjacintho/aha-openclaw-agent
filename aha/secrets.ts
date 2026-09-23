@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
-import { ahaHome } from "./worker.ts";
+import { ahaHome } from "./home.ts";
 
 export type Secrets = {
   productHunt?: string;
