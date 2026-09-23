@@ -1,4 +1,5 @@
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
+import { retryAfterMs } from "./http.ts";
 
 const HOST = "https://hn.algolia.com/api/v1/search_by_date";
 
@@ -39,6 +40,30 @@ function itemUrl(id: string) {
   return `https://news.ycombinator.com/item?id=${id}`;
 }
 
+export function uniqueTermsCaseInsensitive(terms: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const term of terms) {
+    const trimmed = term.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function parseCursor(cursor: string | null): { termIndex: number; page: number } {
+  if (!cursor) return { termIndex: 0, page: 0 };
+  const [termIndex, page] = cursor.split(":");
+  return { termIndex: Number(termIndex) || 0, page: Number(page) || 0 };
+}
+
+function encodeCursor(termIndex: number, page: number) {
+  return `${termIndex}:${page}`;
+}
+
 function hitToItem(hit: Hit): RawItem | undefined {
   const externalId = hit.objectID;
   if (!externalId) return;
@@ -57,27 +82,23 @@ function hitToItem(hit: Hit): RawItem | undefined {
   };
 }
 
-function retryAfterMs(headers: Headers) {
-  const raw = headers.get("retry-after");
-  if (!raw) return;
-  const seconds = Number(raw);
-  if (Number.isFinite(seconds)) return seconds * 1000;
-}
-
-async function read(response: Response): Promise<FetchResult> {
+async function read(response: Response, termIndex: number, termsCount: number, page: number): Promise<FetchResult> {
   if (response.status === 429) return { ok: false, error: "rate_limited", retryAfterMs: retryAfterMs(response.headers) };
   if (response.status === 401 || response.status === 403) return { ok: false, error: "auth" };
   if (!response.ok) return { ok: false, error: "unknown" };
   const payload = await response.json() as { hits?: Hit[]; page?: number; nbPages?: number };
-  const page = payload.page ?? 0;
   const nbPages = payload.nbPages ?? 0;
+  let nextCursor: string | null;
+  if (page + 1 < nbPages) nextCursor = encodeCursor(termIndex, page + 1);
+  else if (termIndex + 1 < termsCount) nextCursor = encodeCursor(termIndex + 1, 0);
+  else nextCursor = null;
   return {
     ok: true,
     items: (payload.hits ?? []).flatMap(hit => {
       const item = hitToItem(hit);
       return item ? [item] : [];
     }),
-    nextCursor: page + 1 < nbPages ? String(page + 1) : null,
+    nextCursor,
   };
 }
 
@@ -88,13 +109,18 @@ export function hnSource(http: typeof fetch = fetch): SourceAdapter {
       return true;
     },
     async fetch(query: SourceQuery, cursor: string | null): Promise<FetchResult> {
-      const page = cursor ? Number(cursor) : 0;
-      const terms = query.terms.filter(Boolean).join(" OR ");
+      const terms = uniqueTermsCaseInsensitive(query.terms);
+      if (terms.length === 0) return { ok: true, items: [], nextCursor: null };
+      const { termIndex, page } = parseCursor(cursor);
+      const boundedIndex = termIndex < terms.length ? termIndex : 0;
+      const term = terms[boundedIndex];
       const since = Math.floor(query.since.getTime() / 1000);
       const until = Math.floor(query.until.getTime() / 1000);
-      const url = `${HOST}?query=${encodeURIComponent(terms)}&numericFilters=${encodeURIComponent(`created_at_i>${since},created_at_i<${until}`)}&hitsPerPage=50&page=${page}`;
+      // The HN Algolia API has no OR operator: "a OR b" is searched as the literal
+      // required words "a", "OR", "b". Each term gets its own request instead.
+      const url = `${HOST}?query=${encodeURIComponent(term)}&numericFilters=${encodeURIComponent(`created_at_i>${since},created_at_i<${until}`)}&hitsPerPage=50&page=${page}`;
       try {
-        return await read(await http(url));
+        return await read(await http(url), boundedIndex, terms.length, page);
       } catch {
         return { ok: false, error: "network" };
       }
