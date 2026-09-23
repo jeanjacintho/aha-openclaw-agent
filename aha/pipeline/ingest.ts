@@ -39,7 +39,8 @@ export function passesFilter1(item: RawItem, cfg: AhaConfig) {
   return passesNegative;
 }
 
-function queryFor(cfg: AhaConfig, now: Date): SourceQuery {
+function queryFor(cfg: AhaConfig, now: Date, window?: { since: Date; until: Date }): SourceQuery {
+  if (window) return { since: window.since, until: window.until, terms: termsFrom(cfg) };
   return { since: new Date(now.getTime() - DAY_MS), until: now, terms: termsFrom(cfg) };
 }
 
@@ -63,10 +64,10 @@ const MAX_PAGES_PER_SOURCE = 500;
 // carry their own injected `fetch` from construction, so runIngest itself has
 // nothing to pass it to today. Kept for interface compatibility with future
 // adapters/tests that may want a shared default.
-export async function runIngest(store: Store, adapters: SourceAdapter[], now: Date, _fetchImpl?: typeof fetch): Promise<IngestReport> {
+export async function runIngest(store: Store, adapters: SourceAdapter[], now: Date, _fetchImpl?: typeof fetch, window?: { since: Date; until: Date }): Promise<IngestReport> {
   const cfg = getConfig(store);
   if (!cfg) return { sources: [] };
-  const query = queryFor(cfg, now);
+  const query = queryFor(cfg, now, window);
   const sources: IngestReport["sources"] = [];
   for (const adapter of adapters) {
     if (!adapter.enabled(cfg)) continue;

@@ -1,48 +1,28 @@
 import { mkdirSync } from "node:fs";
 import { getConfig } from "./config.ts";
-import { buildDigest } from "./digest/build.ts";
-import { renderDigest } from "./digest/render.ts";
+import { classifyNewItems, deliverDigest } from "./digest/deliver.ts";
 import { ahaHome } from "./home.ts";
-import { sendToChat } from "./notify/plow.ts";
-import { classifyBatch, type ItemRow } from "./pipeline/classify.ts";
 import { runIngest } from "./pipeline/ingest.ts";
 import { schedule, type ScheduleHandle } from "./scheduler.ts";
-import { agentIndexSource } from "./sources/agent-index.ts";
-import { hnSource } from "./sources/hn.ts";
+import { watchAdapters } from "./sources/watch.ts";
 import { openStore } from "./store/db.ts";
 
 export { ahaHome };
 
-async function classifyNew() {
-  const store = openStore();
-  try {
-    const items = store.db.prepare("SELECT * FROM items WHERE state = 'new' ORDER BY id").all() as ItemRow[];
-    for (let i = 0; i < items.length; i += 20) await classifyBatch(store, items.slice(i, i + 20));
-  } finally {
-    store.close();
-  }
-}
-
 async function ingestThenClassify() {
   const store = openStore();
   try {
-    await runIngest(store, [hnSource(), agentIndexSource()], new Date());
+    await runIngest(store, watchAdapters(getConfig(store)), new Date());
+    await classifyNewItems(store);
   } finally {
     store.close();
   }
-  await classifyNew();
 }
 
 async function sendDigest() {
   const store = openStore();
   try {
-    const cfg = getConfig(store);
-    const chat = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
-    if (!chat) return;
-    const until = new Date();
-    const model = buildDigest(store, "founder", until, cfg?.tz || "UTC");
-    const text = renderDigest(model, cfg?.language || "pt");
-    await sendToChat(chat, text, `digest:${model.day}:founder`, { store });
+    await deliverDigest(store);
   } finally {
     store.close();
   }

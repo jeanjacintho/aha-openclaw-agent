@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { defineChannelPluginEntry, type ChannelPlugin, type PluginRuntime, type OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, type Account, type Chat, type Message, type TurnOutcome } from "./transport.ts";
+import { registerAhaTools } from "./aha-tools.ts";
 
 let runtime: PluginRuntime;
 const activeTurn = new AsyncLocalStorage<{ chat: Chat; messageUid: string; deliveryUnknown?: boolean; replyDelivered?: boolean }>();
@@ -192,5 +193,6 @@ export default defineChannelPluginEntry({
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
       },
     }));
+    registerAhaTools(api);
   },
 });
