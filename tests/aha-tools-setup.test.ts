@@ -263,7 +263,7 @@ test("aha_digest_now does not consume the scheduled daily digest key", async t =
   assert.equal(posts.length, 2);
   const keys = (store.db.prepare("SELECT key FROM deliveries").all() as { key: string }[]).map(row => row.key);
   assert.equal(keys.filter(key => key.startsWith("digest:now:")).length, 1);
-  assert.equal(keys.filter(key => /^digest:\d{4}-\d{2}-\d{2}:founder$/.test(key)).length, 1);
+  assert.equal(keys.filter(key => /^digest:\d{4}-\d{2}-\d{2}:founder:cht_dm$/.test(key)).length, 1);
 });
 
 test("aha_digest_now reports sent:false when delivery is duplicate or uncertain", async t => {

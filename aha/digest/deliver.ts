@@ -1,5 +1,6 @@
 import { getConfig } from "../config.ts";
 import { classifyBatch, type ClassifyDeps, type ItemRow } from "../pipeline/classify.ts";
+import { ROLES, type Role } from "../pipeline/route.ts";
 import { sendToChat, type SendDeps, type SendResult } from "../notify/plow.ts";
 import { type Store } from "../store/db.ts";
 import { buildDigest } from "./build.ts";
@@ -10,8 +11,8 @@ export async function classifyNewItems(store: Store, deps?: ClassifyDeps) {
   for (let i = 0; i < items.length; i += 20) await classifyBatch(store, items.slice(i, i + 20), deps);
 }
 
-export function scheduledDigestKey(day: string) {
-  return `digest:${day}:founder`;
+export function scheduledDigestKey(day: string, role: Role = "founder", chatUid?: string) {
+  return chatUid ? `digest:${day}:${role}:${chatUid}` : `digest:${day}:${role}`;
 }
 
 export function digestNowKey(at: Date) {
@@ -27,11 +28,24 @@ export function digestSendReply(result: SendResult): { sent: true } | { sent: fa
 export async function deliverDigest(store: Store, deps: SendDeps & ClassifyDeps & { key?: string } = {}): Promise<SendResult> {
   await classifyNewItems(store, deps);
   const cfg = getConfig(store);
-  const chat = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
-  if (!chat) throw new Error("owner DM is not configured");
+  const ownerDm = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
+  if (!ownerDm) throw new Error("owner DM is not configured");
   const until = (deps.now ?? (() => new Date()))();
-  const model = buildDigest(store, "founder", until, cfg?.tz || "UTC");
-  const text = renderDigest(model, cfg?.language || "pt");
-  const key = deps.key ?? scheduledDigestKey(model.day);
-  return sendToChat(chat, text, key, { store, fetch: deps.fetch, now: deps.now });
+  const tz = cfg?.tz || "UTC";
+  const lang = cfg?.language || "pt";
+  const founder = buildDigest(store, "founder", until, tz);
+  const dmKey = deps.key ?? scheduledDigestKey(founder.day, "founder", ownerDm);
+  const dmResult = await sendToChat(ownerDm, renderDigest(founder, lang), dmKey, {
+    store, fetch: deps.fetch, now: deps.now,
+  });
+  for (const role of ROLES) {
+    const chat = cfg?.roleChats?.[role];
+    if (!chat || chat === ownerDm) continue;
+    const model = buildDigest(store, role, until, tz);
+    const key = deps.key ? `${deps.key}:${role}:${chat}` : scheduledDigestKey(model.day, role, chat);
+    await sendToChat(chat, renderDigest(model, lang), key, {
+      store, fetch: deps.fetch, now: deps.now,
+    });
+  }
+  return dmResult;
 }
