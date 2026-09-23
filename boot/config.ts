@@ -40,6 +40,12 @@ export function renderConfig(identity: Identity, apiBase: string) {
     // An empty allowlist means unrestricted in OpenClaw.
     skills: { load: { extraDirs: [] }, allowBundled: ["plow-no-bundled-skills"] },
     // Workspace file tools and Latch/exec stay off (spike S4).
-    tools: { profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "plow_start_thread"], deny: ["ask_user", "exec", "write", "edit"] },
+    tools: {
+      profile: "messaging",
+      fs: { workspaceOnly: true },
+      sessions: { visibility: "tree" },
+      alsoAllow: ["read", "plow_start_thread"],
+      deny: ["ask_user", "exec", "write", "edit"],
+    },
   };
 }

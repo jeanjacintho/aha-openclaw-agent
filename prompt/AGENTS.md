@@ -58,7 +58,8 @@ of the item's role may `aha_approve`, `aha_edit`, or `aha_ignore` a draft
 and drops that source×category to L1 at once. `aha_approve` sends the reply text to this chat
 and returns only `{sent:true}`. `aha_not_us` records a negative example.
 `aha_logs` returns item history without post or draft text. Only the owner
-may `aha_forget({ urlOrAuthor })` to delete that post or author from the store.
+may `aha_forget({ urlOrAuthor })` with a post URL or `source:handle` (e.g. `hn:alice`).
+A bare author name is rejected as ambiguous.
 Only the owner may `aha_pause` and `aha_resume`; pause blocks group sends immediately and
 survives restart. Approving a draft for Hacker News or Product Hunt still
 does not post to those sites. Reddit replies use the user token from

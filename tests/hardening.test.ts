@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { classifyNewItems } from "../aha/digest/deliver.ts";
-import { draftAndNotify, draftReply } from "../aha/responder/drafts.ts";
+import { draftAndNotify, draftReply, notifyExpiredDrafts, validateReply } from "../aha/responder/drafts.ts";
 import { runIngest } from "../aha/pipeline/ingest.ts";
 import { openStore } from "../aha/store/db.ts";
-import { RETENTION_DAYS, forgetByUrlOrAuthor, pruneExpired } from "../aha/store/retention.ts";
+import { RETENTION_DAYS, ForgetError, forgetByUrlOrAuthor, pruneExpired } from "../aha/store/retention.ts";
+import { checkPolicy } from "../aha/responder/policy.ts";
 import { recordUsage } from "../aha/usage/ledger.ts";
 import { classifyAllowed, DEFAULT_DAILY_TOKEN_BUDGET, llmAllowed } from "../aha/usage/budget.ts";
 import entry from "../plugin/index.ts";
@@ -30,13 +31,18 @@ async function home(t: import("node:test").TestContext) {
   return store;
 }
 
-function insertItem(store: ReturnType<typeof openStore>, over: { fetched?: string; author?: string; url?: string; externalId?: string; state?: string } = {}) {
+function insertItem(store: ReturnType<typeof openStore>, over: {
+  fetched?: string; author?: string; url?: string; externalId?: string; state?: string; source?: string; body?: string; title?: string;
+} = {}) {
   store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
-    VALUES ('hn', ?, ?, ?, 't', 'Does plow queue jobs?', ?, ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
+      over.source ?? "hn",
       over.externalId ?? String(Math.random()),
       over.url ?? "https://news.ycombinator.com/item?id=1",
       over.author ?? "alice",
+      over.title ?? "t",
+      over.body ?? "Does plow queue jobs?",
       over.fetched ?? "2026-09-22T12:00:00.000Z",
       over.fetched ?? "2026-09-22T12:00:00.000Z",
       over.state ?? "new",
@@ -174,7 +180,7 @@ test("items older than 90 days are pruned unless they have a pending draft or ar
   store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(pendingId, "Rascunho AHA pending");
   const kept = insertItem(store, { fetched: "2026-09-20T00:00:00.000Z", externalId: "new" });
   const removed = pruneExpired(store, new Date("2026-09-23T00:00:00.000Z"));
-  assert.equal(removed, 3);
+  assert.equal(removed.processed, 3);
   assert.equal(RETENTION_DAYS, 90);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(oldId), undefined);
   assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(kept));
@@ -193,8 +199,9 @@ test("items older than 90 days are pruned unless they have a pending draft or ar
   const pending = store.db.prepare("SELECT id, state, body FROM items WHERE id = ?").get(pendingId) as { id: number; state: string; body: string };
   assert.equal(pending.state, "relevant");
   assert.equal(pending.body, "");
+  assert.deepEqual(removed.expiredItemIds, [pendingId]);
   assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).body, "");
-  assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).state, "pending");
+  assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).state, "expired");
 });
 
 test("forget by url or author removes that post", async t => {
@@ -203,7 +210,7 @@ test("forget by url or author removes that post", async t => {
   const byAuthor = insertItem(store, { author: "mallory", url: "https://news.ycombinator.com/item?id=78", externalId: "78" });
   const other = insertItem(store, { author: "bob", url: "https://news.ycombinator.com/item?id=79", externalId: "79" });
   assert.equal(forgetByUrlOrAuthor(store, "https://news.ycombinator.com/item?id=77"), 1);
-  assert.equal(forgetByUrlOrAuthor(store, "mallory"), 1);
+  assert.equal(forgetByUrlOrAuthor(store, "hn:mallory"), 1);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(byUrl), undefined);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(byAuthor), undefined);
   assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(other));
@@ -212,13 +219,13 @@ test("forget by url or author removes that post", async t => {
 test("forget normalizes URLs and authors, overwrites deleted bytes, and writes an audit row", async t => {
   const store = await home(t);
   const slash = insertItem(store, { url: "https://news.ycombinator.com/item?id=77/", externalId: "77" });
-  const ph = insertItem(store, { url: "https://www.producthunt.com/posts/plow#comment-9", externalId: "ph" });
+  const ph = insertItem(store, { url: "https://www.producthunt.com/posts/plow", source: "ph", externalId: "ph-post" });
   const cased = insertItem(store, { author: "Mallory", url: "https://news.ycombinator.com/item?id=78", externalId: "78" });
   const other = insertItem(store, { author: "bob", url: "https://news.ycombinator.com/item?id=79", externalId: "79" });
   assert.equal((store.db.prepare("PRAGMA secure_delete").get() as { secure_delete: number }).secure_delete, 1, "secure_delete");
   assert.equal(forgetByUrlOrAuthor(store, "http://news.ycombinator.com/item?id=77", { actor: "plow-owner", at: new Date("2026-09-23T12:00:00.000Z") }), 1, "hn trailing slash");
-  assert.equal(forgetByUrlOrAuthor(store, "https://producthunt.com/posts/plow", { actor: "plow-owner" }), 1, "ph fragment");
-  assert.equal(forgetByUrlOrAuthor(store, "MALLORY", { actor: "plow-owner" }), 1, "author case");
+  assert.equal(forgetByUrlOrAuthor(store, "https://producthunt.com/posts/plow", { actor: "plow-owner" }), 1, "ph post without fragment");
+  assert.equal(forgetByUrlOrAuthor(store, "hn:MALLORY", { actor: "plow-owner" }), 1, "author case");
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(slash), undefined);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(ph), undefined);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(cased), undefined);
@@ -235,6 +242,98 @@ test("forget normalizes URLs and authors, overwrites deleted bytes, and writes a
   assert.equal(blob.includes("mallory"), false);
   assert.equal(blob.includes("producthunt.com"), false);
   assert.equal(blob.includes("news.ycombinator.com"), false);
+});
+
+test("forgetting a Product Hunt comment does not delete other comments on the same post", async t => {
+  const store = await home(t);
+  const ana = insertItem(store, {
+    source: "ph", author: "ana", url: "https://www.producthunt.com/posts/plow#comment-PHC_1", externalId: "PHC_1",
+  });
+  const ben = insertItem(store, {
+    source: "ph", author: "ben", url: "https://www.producthunt.com/posts/plow#comment-PHC_2", externalId: "PHC_2",
+  });
+  const cid = insertItem(store, {
+    source: "ph", author: "cid", url: "https://www.producthunt.com/posts/plow#comment-PHC_3", externalId: "PHC_3",
+  });
+  assert.equal(forgetByUrlOrAuthor(store, "https://www.producthunt.com/posts/plow#comment-PHC_1"), 1);
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(ana), undefined);
+  assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(ben));
+  assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(cid));
+});
+
+test("forgotten text is absent from aha.db and aha.db-wal", async t => {
+  const store = await home(t);
+  const marker = "FORGET_WAL_MARKER_9f3a7c";
+  insertItem(store, {
+    url: "https://news.ycombinator.com/item?id=wal",
+    externalId: "wal",
+    body: `secret ${marker} stays out of wal`,
+  });
+  assert.equal(forgetByUrlOrAuthor(store, "https://news.ycombinator.com/item?id=wal"), 1);
+  for (const name of ["aha.db", "aha.db-wal", "aha.db-shm"]) {
+    const file = path.join(process.env.AHA_HOME!, name);
+    try {
+      const bytes = await fs.readFile(file);
+      assert.equal(bytes.includes(Buffer.from(marker)), false, name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+});
+
+test("a bare author handle is rejected as ambiguous", async t => {
+  const store = await home(t);
+  insertItem(store, { author: "alice", source: "hn", externalId: "hn-a" });
+  insertItem(store, { author: "Alice", source: "reddit", url: "https://reddit.com/r/x/comments/1", externalId: "r-a" });
+  assert.throws(() => forgetByUrlOrAuthor(store, "alice"), ForgetError);
+  assert.throws(() => forgetByUrlOrAuthor(store, "alice"), /source:handle/);
+  assert.equal(forgetByUrlOrAuthor(store, "hn:alice"), 1);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n, 1);
+});
+
+test("forget audit hashes use a local HMAC secret, not raw sha256", async t => {
+  const { createHash, createHmac } = await import("node:crypto");
+  const store = await home(t);
+  insertItem(store, { author: "mallory", externalId: "m1" });
+  forgetByUrlOrAuthor(store, "hn:mallory");
+  const hash = (store.db.prepare("SELECT target_hash FROM forget_audit").get() as { target_hash: string }).target_hash;
+  const raw = createHash("sha256").update("author:hn:mallory").digest("hex");
+  assert.notEqual(hash, raw);
+  const secret = (await fs.readFile(path.join(process.env.AHA_HOME!, "forget.key"), "utf8")).trim();
+  assert.equal(hash, createHmac("sha256", secret).update("author:hn:mallory").digest("hex"));
+});
+
+test("a redacted pending draft is expired, not approvable, and the role group is notified", async t => {
+  const store = await home(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    ownerChatUid: "cht_dm",
+    language: "en",
+    roleChats: { marketing: "cht_marketing" },
+  });
+  const pendingId = insertItem(store, { fetched: "2026-06-01T00:00:00.000Z", externalId: "pending", state: "relevant" });
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(pendingId);
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(pendingId, "Thanks for asking about queues.");
+  pruneExpired(store, new Date("2026-09-23T00:00:00.000Z"));
+  const draft = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ?").get(pendingId) as {
+    id: number; itemId: number; body: string; state: string;
+  };
+  assert.equal(draft.state, "expired");
+  assert.equal(draft.body, "");
+  assert.equal(validateReply("", { company: "Plow", lang: "en", url: null }).ok, false);
+  assert.equal(checkPolicy(store, draft, new Date("2026-09-23T12:00:00.000Z")).allow, false);
+  const posts: string[] = [];
+  await notifyExpiredDrafts(store, [pendingId], {
+    fetch: async (input, init) => {
+      if (String(input).includes("/messages")) {
+        posts.push(String(init?.body ?? ""));
+        return Response.json({ uid: "msg" });
+      }
+      return new Response("", { status: 404 });
+    },
+  });
+  assert.equal(posts.some(body => body.includes(`AHA-${pendingId}`) && body.includes("expirou")), true);
 });
 
 test("aha_forget is owner-only", async t => {

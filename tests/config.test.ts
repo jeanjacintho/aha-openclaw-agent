@@ -95,8 +95,19 @@ test("configuration denies exec, write, edit, and does not mount Latch", () => {
   assert.equal(config.tools.alsoAllow.includes("edit"), false);
   for (const name of ["exec", "write", "edit"]) assert.equal(config.tools.deny.includes(name), true);
   assert.deepEqual(config.tools, {
-    profile: "messaging", sessions: { visibility: "tree" }, alsoAllow: ["read", "plow_start_thread"], deny: ["ask_user", "exec", "write", "edit"],
+    profile: "messaging",
+    fs: { workspaceOnly: true },
+    sessions: { visibility: "tree" },
+    alsoAllow: ["read", "plow_start_thread"],
+    deny: ["ask_user", "exec", "write", "edit"],
   });
+});
+
+test("filesystem tools cannot read secrets.json outside the workspace", () => {
+  const config = renderConfig(identity, "http://api:8000");
+  assert.equal(config.tools.fs.workspaceOnly, true);
+  assert.equal(config.agents.defaults.workspace, "/var/lib/plow/workspace");
+  assert.equal("/var/lib/plow/aha/secrets.json".startsWith(`${config.agents.defaults.workspace}/`), false);
 });
 
 test("private transcript recall is disabled across isolated conversations", () => {

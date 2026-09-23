@@ -87,10 +87,12 @@ export function hasOffListLink(text: string, allowed: string[]) {
 }
 
 export function validateReply(text: string, ctx: { company: string; lang: string; url: string | null; links?: string[] }, mode: "clean" | "strict" = "clean"): ValidateResult {
+  if (typeof text !== "string" || !text.trim()) return { ok: false, reason: "empty" };
   if (PROMISE.test(text)) return { ok: false, reason: "promise" };
   const allowed = allowedUrls(ctx.url, ctx.links);
   if (mode === "strict" && hasOffListLink(text, allowed)) return { ok: false, reason: "link" };
   let body = mode === "clean" ? stripOffListLinks(text, allowed) : text.trim();
+  if (!body.trim()) return { ok: false, reason: "empty" };
   const lang = (ctx.lang || "en").toLowerCase();
   if (!lang.startsWith("pt") && !lang.startsWith("en")) return { ok: false, reason: "language" };
   if (lang.startsWith("pt") && (!PT_MARK.test(body) || EN_MARK.test(body))) return { ok: false, reason: "language" };
@@ -98,6 +100,5 @@ export function validateReply(text: string, ctx: { company: string; lang: string
   const sign = signature(ctx.company, lang);
   if (!body.includes(sign)) body = `${body}\n${sign}`.trim();
   if (body.length > MAX_BODY + sign.length + 2) return { ok: false, reason: "length" };
-  if (!body.trim()) return { ok: false, reason: "empty" };
   return { ok: true, body };
 }

@@ -146,6 +146,20 @@ function recordDraftFailure(store: Store, itemId: number, error: unknown) {
     .run(message.slice(0, 200), itemId);
 }
 
+export async function notifyExpiredDrafts(store: Store, itemIds: number[], deps: DraftDeps = {}) {
+  if (!itemIds.length) return;
+  const cfg = getConfig(store);
+  for (const itemId of itemIds) {
+    const row = store.db.prepare(`SELECT items.url, classifications.category, classifications.urgency
+      FROM items
+      LEFT JOIN classifications ON classifications.item_id = items.id
+      WHERE items.id = ?`).get(itemId) as { url: string | null; category: string | null; urgency: string | null } | undefined;
+    const roles = routeItem({ category: row?.category ?? "other", urgency: row?.urgency });
+    const text = `Rascunho AHA-${itemId} expirou (retenção 90 dias).${row?.url ? `\n${row.url}` : ""}`;
+    await notifyChats(store, cfg, roles.length ? roles : ["founder"], text, "expire", itemId, deps);
+  }
+}
+
 export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
   const cfg = getConfig(store);
   const now = deps.now?.() ?? new Date();
