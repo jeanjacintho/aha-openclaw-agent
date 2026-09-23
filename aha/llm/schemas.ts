@@ -1,3 +1,5 @@
+import { normalizeTopic } from "../pipeline/topics.ts";
+
 export type Schema<T> = {
   parse(input: unknown): T;
 };
@@ -84,7 +86,7 @@ function hasUrl(text: string) {
 }
 
 function badTopic(text: string) {
-  return hasUrl(text) || /[\/@]/.test(text) || text.length > 80;
+  return hasUrl(text) || /[\/@]/.test(text) || text.length > 80 || !normalizeTopic(text);
 }
 
 export function parseClassification(input: unknown): Classification {

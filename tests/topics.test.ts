@@ -30,7 +30,9 @@ test("Login bug and login-bug reuse one topic by normalization", async t => {
   const a = assignTopic(store, "Login bug");
   const b = assignTopic(store, "login-bug");
   assert.equal(a, b);
-  assert.deepEqual(listTopics(store).map(row => row.label), ["Login bug"]);
+  assert.equal(assignTopic(store, "login bug."), a);
+  assert.equal(assignTopic(store, "Integração"), assignTopic(store, "integracao"));
+  assert.deepEqual(listTopics(store).map(row => row.label), ["Login bug", "Integração"]);
 });
 
 test("bug de login reuses Login bug when that label is on the existing-topic list passed to the LLM", async t => {

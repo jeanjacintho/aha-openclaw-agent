@@ -3,7 +3,14 @@ import { type Store } from "../store/db.ts";
 export type Topic = { id: number; label: string };
 
 export function normalizeTopic(label: string) {
-  return label.toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  return label
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[-_]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function listTopics(store: Store): Topic[] {
