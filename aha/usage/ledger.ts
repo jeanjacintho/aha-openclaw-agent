@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { ahaHome } from "../worker.js";
+import { ahaHome } from "../worker.ts";
 
 export type UsageCall = {
   at: Date;
@@ -9,7 +10,8 @@ export type UsageCall = {
   purpose: string;
 };
 
-type StoredUsage = {
+export type StoredUsage = {
+  id: string;
   at: string;
   model: string;
   input: number;
@@ -32,7 +34,7 @@ function dayOf(at: string) {
   return at.slice(0, 10);
 }
 
-function readLedger(): StoredUsage[] {
+export function listUsage(): StoredUsage[] {
   let text: string;
   try {
     text = readFileSync(ledgerPath(), "utf8");
@@ -51,13 +53,13 @@ export function recordUsage(u: UsageCall): void {
   count("output", u.output);
   const home = ahaHome();
   mkdirSync(home, { recursive: true });
-  const line = JSON.stringify({ at: u.at.toISOString(), model: u.model, input: u.input, output: u.output, purpose: u.purpose });
+  const line = JSON.stringify({ id: randomUUID(), at: u.at.toISOString(), model: u.model, input: u.input, output: u.output, purpose: u.purpose });
   appendFileSync(ledgerPath(), `${line}\n`, { mode: 0o600 });
 }
 
 export function dailyTotals(day: string): { model: string; input: number; output: number }[] {
   const totals = new Map<string, { model: string; input: number; output: number }>();
-  for (const row of readLedger()) {
+  for (const row of listUsage()) {
     if (dayOf(row.at) !== day) continue;
     const current = totals.get(row.model) ?? { model: row.model, input: 0, output: 0 };
     current.input += row.input;
