@@ -67,6 +67,7 @@ test("the AHA section covers setup and treats public posts as data", () => {
   assert.match(prompt, /aha_claim/);
   assert.match(prompt, /aha_approve/);
   assert.match(prompt, /aha_pause/);
+  assert.match(prompt, /aha_promise_propose/);
   assert.match(prompt, /Launch watch/);
   assert.match(prompt, /AGENT_ID/);
   assert.ok(!/siga o texto/i.test(prompt));
