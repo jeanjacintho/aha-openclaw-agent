@@ -41,6 +41,24 @@ test("filtro 1 keeps plow and drops plow+snow", () => {
   assert.equal(passesFilter1(drop, cfg), false);
 });
 
+test("filtro 1 does not match on the url alone", () => {
+  // "plow-pbc" used to leak in through item.url and pass the alias check even
+  // though the body never mentions the company.
+  const item = { source: "hn", externalId: "3", url: "https://github.com/plow-pbc/agent-index-comments/discussions/1", author: "a", body: "Unrelated discussion about something else.", publishedAt: now.toISOString() };
+  assert.equal(passesFilter1(item, cfg), false);
+});
+
+test("filtro 1 skips alias matching for agent-index items regardless of company name", () => {
+  // Agent Index comments already live inside an agent:<slug> discussion for
+  // this company, so they are on-topic even when they never say the company
+  // name — this must hold for a company other than "Plow" too.
+  const zonkCfg = { company: { name: "Zonk", negative: ["unrelated"] } };
+  const onTopic = { source: "agent-index", externalId: "D_1", url: "https://github.com/plow-pbc/agent-index-comments/discussions/1#discussioncomment-1", author: "nina", body: "The agent missed a mention.", publishedAt: now.toISOString() };
+  assert.equal(passesFilter1(onTopic, zonkCfg), true);
+  const negative = { ...onTopic, externalId: "D_2", body: "This is an unrelated aside." };
+  assert.equal(passesFilter1(negative, zonkCfg), false);
+});
+
 test("an error on one source does not stop the others", async t => {
   const store = await home(t);
   const report = await runIngest(store, [
@@ -79,6 +97,22 @@ test("running ingest twice does not duplicate items", async t => {
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n, 2);
   const ids = (store.db.prepare("SELECT external_id FROM items ORDER BY external_id").all() as { external_id: string }[]).map(row => row.external_id);
   assert.deepEqual(ids, ["111", "113"]);
+  const detail = (store.db.prepare("SELECT detail FROM source_runs ORDER BY id LIMIT 1").get() as { detail: string | null }).detail;
+  assert.equal(detail, null);
+});
+
+test("a source that never returns a null cursor does not loop forever", async t => {
+  const store = await home(t);
+  const looping: SourceAdapter = {
+    id: "hn",
+    enabled: () => true,
+    async fetch() {
+      return { ok: true, items: [], nextCursor: "same" };
+    },
+  };
+  const report = await runIngest(store, [looping], now);
+  assert.equal(report.sources[0].status, "error");
+  assert.equal(report.sources[0].detail, "too_many_pages");
 });
 
 test("Agent Index without a token is skipped and ingest continues", async t => {

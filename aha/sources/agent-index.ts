@@ -1,4 +1,5 @@
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
+import { retryAfterMs } from "./http.ts";
 
 const GQL = "https://api.github.com/graphql";
 const OWNER = "plow-pbc";
@@ -9,11 +10,11 @@ const QUERY = `query($after: String) {
     discussions(first: 50, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        title url createdAt
-        comments(first: 100) {
+        title url createdAt updatedAt
+        comments(last: 100) {
           nodes {
             id url createdAt body author { login }
-            replies(first: 100) {
+            replies(last: 100) {
               nodes { id url createdAt body author { login } }
             }
           }
@@ -35,14 +36,24 @@ type CommentNode = {
 type DiscussionNode = {
   title?: string;
   url?: string;
+  updatedAt?: string;
   comments?: { nodes?: CommentNode[] };
 };
 
-function retryAfterMs(headers: Headers) {
-  const raw = headers.get("retry-after");
-  if (!raw) return;
-  const seconds = Number(raw);
-  if (Number.isFinite(seconds)) return seconds * 1000;
+type GraphQLError = { type?: string; message?: string };
+
+// GitHub returns HTTP 403 both for auth failures and for primary/secondary
+// rate limits. Rate limits carry either a Retry-After header (secondary) or
+// X-RateLimit-Remaining: 0 with X-RateLimit-Reset (primary); anything else is auth.
+function rateLimitFrom403(headers: Headers): { limited: boolean; retryAfterMs?: number } {
+  const retryAfter = retryAfterMs(headers);
+  if (retryAfter !== undefined) return { limited: true, retryAfterMs: retryAfter };
+  if (headers.get("x-ratelimit-remaining") === "0") {
+    const reset = headers.get("x-ratelimit-reset");
+    const resetMs = reset ? Number(reset) * 1000 : undefined;
+    return { limited: true, retryAfterMs: resetMs && Number.isFinite(resetMs) ? Math.max(0, resetMs - Date.now()) : undefined };
+  }
+  return { limited: false };
 }
 
 function inWindow(at: string | undefined, query: SourceQuery) {
@@ -83,17 +94,35 @@ export function agentIndexSource(opts: { fetch?: typeof fetch; token?: string; s
           body: JSON.stringify({ query: QUERY, variables: { after: cursor } }),
         });
         if (response.status === 429) return { ok: false, error: "rate_limited", retryAfterMs: retryAfterMs(response.headers) };
-        if (response.status === 401 || response.status === 403) return { ok: false, error: "auth" };
+        if (response.status === 403) {
+          const rateLimit = rateLimitFrom403(response.headers);
+          if (rateLimit.limited) return { ok: false, error: "rate_limited", retryAfterMs: rateLimit.retryAfterMs };
+          return { ok: false, error: "auth" };
+        }
+        if (response.status === 401) return { ok: false, error: "auth" };
         if (!response.ok) return { ok: false, error: "unknown" };
         const payload = await response.json() as {
           data?: { repository?: { discussions?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string }; nodes?: DiscussionNode[] } } };
+          errors?: GraphQLError[];
         };
+        // GraphQL returns HTTP 200 even when the query fails; an `errors` array
+        // must not be read as "no mentions" (spec §6.5: unknown health, not zero).
+        if (payload.errors && payload.errors.length > 0) {
+          const rateLimited = payload.errors.some(error => error.type === "RATE_LIMITED");
+          return { ok: false, error: rateLimited ? "rate_limited" : "unknown" };
+        }
         const discussions = payload.data?.repository?.discussions;
+        const nodes = discussions?.nodes ?? [];
         const prefix = `agent:${slug}`;
-        const items = (discussions?.nodes ?? [])
+        const items = nodes
           .filter(node => (node.title || "").trim() === prefix || (node.title || "").startsWith(`${prefix} `))
           .flatMap(node => (node.comments?.nodes ?? []).flatMap(comment => toItem(comment, node.url, query)));
-        const next = discussions?.pageInfo?.hasNextPage ? discussions.pageInfo.endCursor ?? null : null;
+        // Discussions come back UPDATED_AT DESC: once the oldest node on this page
+        // is already older than the window, every later page is older still, so
+        // stop instead of walking the whole repository every round.
+        const oldest = nodes[nodes.length - 1];
+        const pastWindow = oldest !== undefined && Date.parse(oldest.updatedAt ?? "") < query.since.getTime();
+        const next = !pastWindow && discussions?.pageInfo?.hasNextPage ? discussions.pageInfo.endCursor ?? null : null;
         return { ok: true, items, nextCursor: next };
       } catch {
         return { ok: false, error: "network" };
