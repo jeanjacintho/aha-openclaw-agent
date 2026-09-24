@@ -28,6 +28,10 @@ export function renderConfig(identity: Identity, apiBase: string) {
       workspace: "/var/lib/plow/workspace", skipBootstrap: true,
       model: { primary: "plow/z-ai/glm-5.2", fallbacks: ["plow/anthropic/claude-sonnet-5"] }, sandbox: { mode: "off" },
     } },
+    ...(identity.mcp_url ? { mcp: { sessionIdleTtlMs: 300_000, servers: { plow: {
+      url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",
+      headers: { Authorization: "Bearer ${PLOW_MCP_BRIDGE_TOKEN}" },
+    } } } } : {}),
     plugins: { load: { paths: ["/opt/plow/plugin"] }, entries: { plow: { enabled: true } } },
     channels: { plow: {
       apiBase, lineUid: identity.line.uid,
@@ -38,14 +42,21 @@ export function renderConfig(identity: Identity, apiBase: string) {
     commands: { ownerAllowFrom: ["plow-owner"] },
     memory: { search: { rememberAcrossConversations: false } },
     // An empty allowlist means unrestricted in OpenClaw.
-    skills: { load: { extraDirs: [] }, allowBundled: ["plow-no-bundled-skills"] },
-    // Workspace file tools and Latch/exec stay off (spike S4).
+    skills: { load: { extraDirs: ["/opt/plow/skills"] }, allowBundled: ["plow-no-bundled-skills"] },
+    // Keep workspace and durable memory writes local instead of routing them through the Mac relay.
+    // AHA talks in groups with people who are not the owner, and the base hands
+    // every sender every tool. Latch (plow__*), exec, write and edit stay with
+    // the owner; read never leaves the workspace (secrets.json lives outside it).
     tools: {
       profile: "messaging",
       fs: { workspaceOnly: true },
       sessions: { visibility: "tree" },
-      alsoAllow: ["read", "plow_start_thread"],
-      deny: ["ask_user", "exec", "write", "edit"],
+      alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"],
+      deny: ["ask_user"],
+      toolsBySender: {
+        "id:plow-owner": {},
+        "*": { deny: ["plow__*", "exec", "write", "edit"] },
+      },
     },
   };
 }
