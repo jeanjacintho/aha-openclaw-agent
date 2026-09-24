@@ -26,6 +26,8 @@ const mktMember = { type: "member", uid: "mem_mkt", role: "member", display_name
 const mkt2Member = { type: "member", uid: "mem_mkt2", role: "member", display_name: "Mkt2", provider_key: "+15550004444" };
 const dm = { uid: "cht_dm", status: "active", trusted: true, participants: [self, owner] };
 const team = { uid: "cht_team", status: "active", trusted: true, participants: [self, owner, prodMember, mktMember, mkt2Member] };
+const founderTimes = { type: "agent", relationship: "peer", line: { uid: "ln_ft", display_name: "Founder Times", provider_key: "+15550009999" } };
+const withAgent = { uid: "cht_ft", status: "active", trusted: true, participants: [self, owner, founderTimes] };
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -33,14 +35,14 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function home(t: import("node:test").TestContext, capture: { chats?: { members: string[]; body?: string }[]; messages?: { url: string; body: string }[] } = {}) {
+async function home(t: import("node:test").TestContext, capture: { chats?: { members: string[]; body?: string }[]; messages?: { url: string; body: string }[]; listing?: object[] } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-roles-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    if (url.endsWith("/v1/chats") && method === "GET") return Response.json({ data: [dm, team], has_more: false });
+    if (url.endsWith("/v1/chats") && method === "GET") return Response.json({ data: capture.listing ?? [dm, team], has_more: false });
     if (url.endsWith("/v1/chats") && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { body?: string; members?: string[] };
       capture.chats?.push({ members: body.members ?? [], body: body.body });
@@ -242,4 +244,58 @@ test("deliverDigest sends each role slice to its group with a separate key", asy
     "digest:2026-09-22:marketing:cht_marketing",
     "digest:2026-09-22:produto:cht_produto",
   ]);
+});
+
+test("without an explicit request, role groups hold only the owner and assigned humans", async t => {
+  const chats: { members: string[]; body?: string }[] = [];
+  await home(t, { chats, listing: [dm, team, withAgent] });
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await map.get("aha_role_assign")!.execute("call", { memberUid: "mem_mkt", role: "marketing" });
+  const result = await map.get("aha_role_groups_create")!.execute("call", {});
+  assert.equal(result.isError ?? false, false);
+  assert.deepEqual(chats.map(chat => chat.members), [["+15550001111"], ["+15550001111"], ["+15550001111", "+15550003333"], ["+15550001111"]]);
+  assert.equal(JSON.stringify(chats).includes("+15550009999"), false);
+});
+
+test("another agent seen in a chat joins a role's group when the owner names it", async t => {
+  const chats: { members: string[]; body?: string }[] = [];
+  const dir = await home(t, { chats, listing: [dm, team, withAgent] });
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await map.get("aha_role_groups_create")!.execute("call", { agents: [{ role: "marketing", agent: "ln_ft" }] });
+  assert.equal(result.isError ?? false, false);
+  const byRole = Object.fromEntries(chats.map(chat => [chat.body, chat.members]));
+  assert.deepEqual(byRole["Grupo marketing do AHA"], ["+15550001111", "+15550009999"]);
+  for (const role of ["founder", "produto", "engenharia"]) assert.deepEqual(byRole[`Grupo ${role} do AHA`], ["+15550001111"]);
+  // Joining a group grants no role: the agent cannot claim as a member of one.
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.deepEqual(store.db.prepare("SELECT person FROM people_roles").all(), []);
+});
+
+test("an unknown agent creates no group and lists the agents seen", async t => {
+  const chats: { members: string[]; body?: string }[] = [];
+  await home(t, { chats, listing: [dm, team, withAgent] });
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await map.get("aha_role_groups_create")!.execute("call", { agents: [{ role: "marketing", agent: "ln_nope" }] });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /ln_ft \(Founder Times\)/);
+  assert.equal(chats.length, 0);
+});
+
+test("a human or this line itself is not accepted as an agent", async t => {
+  await home(t, { listing: [dm, team, withAgent] });
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  for (const agent of ["mem_prod", "line"]) {
+    const result = await map.get("aha_role_groups_create")!.execute("call", { agents: [{ role: "produto", agent }] });
+    assert.equal(result.isError, true, agent);
+  }
+});
+
+test("an agent asked for a role whose group exists is reported, not silently dropped", async t => {
+  await home(t, { listing: [dm, team, withAgent] });
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await map.get("aha_role_groups_create")!.execute("call", {});
+  const result = await map.get("aha_role_groups_create")!.execute("call", { agents: [{ role: "marketing", agent: "ln_ft" }] });
+  assert.equal(result.isError ?? false, false);
+  assert.deepEqual((result.details as { notAdded: unknown[] }).notAdded, [{ role: "marketing", agent: "ln_ft", reason: "the role's group already exists" }]);
 });

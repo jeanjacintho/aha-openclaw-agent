@@ -51,6 +51,8 @@ Only the owner can save setup, set source tokens, or run a backfill. Call
 `aha_secret_set` only in the owner's DM; never repeat a token in a reply or
 log. Any member may call `aha_status`. The owner assigns roles with
 `aha_role_assign` and creates one group per role with `aha_role_groups_create`.
+Add another Plow agent to a role's group only when the owner explicitly asks
+for that agent in that role; pass it in `agents` by line uid.
 Members of a role may `aha_claim` items routed to that role. `aha_ask` in a
 role group returns only that role's slice from the store. The owner or a member
 of the item's role may `aha_approve`, `aha_edit`, or `aha_ignore` a draft
