@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync } from "node:fs";
 import { test } from "node:test";
 import { renderConfig, type Identity } from "../boot/config.ts";
 
@@ -44,12 +45,13 @@ test("boot accepts no owner chat or ambiguous owner chats without waiting", () =
   }
 });
 
-test("provider uses environment references, never credential values", () => {
+test("provider and optional MCP use environment references, never credential values", () => {
   const config = renderConfig({ ...identity, mcp_url: "http://api:8000/relay" }, "http://api:8000");
   assert.equal(config.models.providers.plow.apiKey, "${PLOW_AGENT_TOKEN}");
   assert.equal(config.models.providers.plow.baseUrl, "http://api:8000/v1");
   assert.equal(config.gateway.auth.token, "${OPENCLAW_GATEWAY_TOKEN}");
-  assert.equal(config.mcp, undefined);
+  assert.equal(config.mcp?.servers.plow.url, "http://127.0.0.1:18790/mcp");
+  assert.equal(renderConfig(identity, "http://api:8000").mcp, undefined);
 });
 
 test("GLM falls back to Sonnet on the Plow provider with explicit capacity and pricing", () => {
@@ -71,43 +73,54 @@ test("the configured Plow provider permits an operator-controlled private endpoi
   assert.equal(config.models.providers.plow.request.allowPrivateNetwork, true);
 });
 
-test("mcp is omitted even when mcp_url is set", () => {
+test("MCP sessions share the loopback bridge and expire after five idle minutes", () => {
   const config = renderConfig({ ...identity, mcp_url: "https://relay.internal/mcp" }, "http://api:8000");
-  assert.equal("mcp" in config, false);
-  assert.equal(config.mcp, undefined);
+  assert.deepEqual(config.mcp, { sessionIdleTtlMs: 300_000, servers: { plow: {
+    url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",
+    headers: { Authorization: "Bearer ${PLOW_MCP_BRIDGE_TOKEN}" },
+  } } });
 });
 
 test("phone turns cannot block on ask_user", () => {
-  assert.deepEqual(renderConfig(identity, "http://api:8000").tools.deny, ["ask_user", "exec", "write", "edit"]);
+  assert.deepEqual(renderConfig(identity, "http://api:8000").tools.deny, ["ask_user"]);
 });
 
-test("configuration denies exec, write, edit, and does not mount Latch", () => {
-  const config = renderConfig({ ...identity, mcp_url: "http://api:8000/relay" }, "http://api:8000");
-  const blob = JSON.stringify(config).toLowerCase();
-  assert.equal(config.mcp, undefined);
-  assert.equal("mcp" in config, false);
-  assert.deepEqual(config.skills.load.extraDirs, []);
-  assert.equal(blob.includes("latch"), false);
-  assert.equal(blob.includes("owners-mac"), false);
-  assert.equal(blob.includes("google-workspace"), false);
-  assert.equal(config.tools.alsoAllow.includes("exec"), false);
-  assert.equal(config.tools.alsoAllow.includes("write"), false);
-  assert.equal(config.tools.alsoAllow.includes("edit"), false);
-  for (const name of ["exec", "write", "edit"]) assert.equal(config.tools.deny.includes(name), true);
-  assert.deepEqual(config.tools, {
-    profile: "messaging",
-    fs: { workspaceOnly: true },
-    sessions: { visibility: "tree" },
-    alsoAllow: ["read", "plow_start_thread"],
-    deny: ["ask_user", "exec", "write", "edit"],
+test("native messaging retains local workspace and memory file tools for the owner only", () => {
+  assert.deepEqual(renderConfig(identity, "http://api:8000").tools, {
+    profile: "messaging", fs: { workspaceOnly: true }, sessions: { visibility: "tree" },
+    alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"], deny: ["ask_user"],
+    toolsBySender: { "id:plow-owner": {}, "*": { deny: ["plow__*", "exec", "write", "edit"] } },
   });
 });
 
-test("filesystem tools cannot read secrets.json outside the workspace", () => {
-  const config = renderConfig(identity, "http://api:8000");
-  assert.equal(config.tools.fs.workspaceOnly, true);
-  assert.equal(config.agents.defaults.workspace, "/var/lib/plow/workspace");
-  assert.equal("/var/lib/plow/aha/secrets.json".startsWith(`${config.agents.defaults.workspace}/`), false);
+test("Latch is never mounted without the non-owner lock", () => {
+  const config = renderConfig({ ...identity, mcp_url: "https://relay.internal/mcp" }, "http://api:8000");
+  assert.ok(config.mcp?.servers.plow);
+  for (const name of ["plow__*", "exec", "write", "edit"]) assert.ok(config.tools.toolsBySender["*"].deny.includes(name), name);
+});
+
+test("read cannot leave the workspace, so secrets.json stays out of reach", () => {
+  assert.equal(renderConfig(identity, "http://api:8000").tools.fs.workspaceOnly, true);
+});
+
+// OpenClaw's own resolver and matcher, found by name so a version bump that
+// renames the hashed chunks still runs them (or fails here, loudly).
+const dist = new URL("../node_modules/openclaw/dist/", import.meta.url);
+const chunk = async (prefix: string) => {
+  const name = readdirSync(dist).find(file => file.startsWith(`${prefix}-`) && file.endsWith(".mjs"));
+  assert.ok(name, `openclaw dist has no ${prefix} chunk`);
+  return import(new URL(name, dist).href);
+};
+
+test("OpenClaw gives Latch and exec to the owner and to nobody else", async () => {
+  const { t: resolveSenderToolPolicy } = await chunk("sender-tool-policy");
+  const { o: isToolAllowedByPolicyName } = await chunk("tool-policy-match");
+  const config = renderConfig({ ...identity, mcp_url: "https://relay.internal/mcp" }, "http://api:8000");
+  const allowed = (senderId: string, tool: string) => isToolAllowedByPolicyName(tool, resolveSenderToolPolicy({ config, messageProvider: "plow", senderId }));
+  for (const tool of ["plow__plow_run_command", "exec", "write", "edit", "read"]) assert.equal(allowed("plow-owner", tool), true, `owner ${tool}`);
+  for (const tool of ["plow__plow_run_command", "exec", "write", "edit"]) assert.equal(allowed("mem_guest", tool), false, `guest ${tool}`);
+  assert.equal(allowed("mem_guest", "read"), true);
+  assert.equal(allowed("mem_guest", "plow_start_thread"), true);
 });
 
 test("private transcript recall is disabled across isolated conversations", () => {
