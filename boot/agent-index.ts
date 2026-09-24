@@ -1,7 +1,33 @@
 import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { exportLedger } from "../aha/usage/ledger-export.ts";
 
 const CLIENT = "/opt/plow/agent-index-client.py";
+
+/** Keep one agentsview daemon alive instead of handing off every idle timeout.
+ *
+ * agentsview 0.44.0 lets a daemon go idle while it still holds db.write.lock:
+ * for 15-40 minutes before it exits, each sync starts a replacement that dies
+ * on that lock, and those passes report stale usage. A top-level
+ * daemon_idle_timeout of "0s" keeps the daemon up. The file also holds the
+ * daemon's own tokens, so the key is only prepended, never rewritten.
+ */
+export function keepAgentsviewDaemon(state = "/var/lib/plow") {
+  const file = `${state}/.agentsview/config.toml`;
+  try {
+    let current = "";
+    try {
+      current = readFileSync(file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (/^\s*daemon_idle_timeout\s*=/m.test(current)) return;
+    mkdirSync(`${state}/.agentsview`, { recursive: true, mode: 0o700 });
+    writeFileSync(file, `daemon_idle_timeout = "0s"\n${current}`, { mode: 0o600 });
+  } catch (error) {
+    console.error(`agent-index: agentsview daemon stays on its idle timeout: ${(error as Error).message}`);
+  }
+}
 
 // Registers this agent on the Agent Index and reports its token usage every
 // five minutes, the contract the Hermes base runs as an s6 service. This image
@@ -20,6 +46,7 @@ const CLIENT = "/opt/plow/agent-index-client.py";
 export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
   const agent = process.env.AGENT_ID;
   if (!agent) return undefined;
+  keepAgentsviewDaemon(state);
   // The Plow bearer is passed to the register pass only, the same split the
   // client documents: registration exchanges it once for an Index key, and
   // every report after that uses the key the client stored.
