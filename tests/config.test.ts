@@ -78,6 +78,7 @@ test("MCP sessions share the loopback bridge and expire after five idle minutes"
   assert.deepEqual(config.mcp, { sessionIdleTtlMs: 300_000, servers: { plow: {
     url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",
     headers: { Authorization: "Bearer ${PLOW_MCP_BRIDGE_TOKEN}" },
+    requestTimeoutMs: 60_000,
   } } });
 });
 

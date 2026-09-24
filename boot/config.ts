@@ -31,6 +31,9 @@ export function renderConfig(identity: Identity, apiBase: string) {
     ...(identity.mcp_url ? { mcp: { sessionIdleTtlMs: 300_000, servers: { plow: {
       url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",
       headers: { Authorization: "Bearer ${PLOW_MCP_BRIDGE_TOKEN}" },
+      // Without it OpenClaw caps the tool listing at 1500ms, and a relay round
+      // trip to the Mac takes 0.9-1.8s. 60s is OpenClaw's own request default.
+      requestTimeoutMs: 60_000,
     } } } } : {}),
     plugins: { load: { paths: ["/opt/plow/plugin"] }, entries: { plow: { enabled: true } } },
     channels: { plow: {
