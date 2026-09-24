@@ -6,7 +6,7 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { startAgentIndex } from "../boot/agent-index.ts";
+import { keepAgentsviewDaemon, startAgentIndex } from "../boot/agent-index.ts";
 
 /** Answers each client call with the exit code the case is about, and records what it was asked to run. */
 function fakeClient(t: import("node:test").TestContext, codes: number[]) {
@@ -109,4 +109,27 @@ test("an unreadable OpenClaw store is the client's to report, and the pass still
   startAgentIndex(300_000, state)?.close?.();
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(argv(calls), [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
+});
+
+test("agentsview keeps its daemon: the idle timeout is prepended, the daemon's own keys kept", async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "plow-state-"));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  await fs.mkdir(path.join(state, ".agentsview"));
+  const file = path.join(state, ".agentsview", "config.toml");
+  await fs.writeFile(file, 'auth_token = "a"\ncursor_secret = "b"\n\n[remote]\nhost = "x"\n');
+  keepAgentsviewDaemon(state);
+  keepAgentsviewDaemon(state);
+  assert.equal(await fs.readFile(file, "utf8"), 'daemon_idle_timeout = "0s"\nauth_token = "a"\ncursor_secret = "b"\n\n[remote]\nhost = "x"\n');
+});
+
+test("agentsview idle timeout is written on a fresh state and an owner's own value is left alone", async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "plow-state-"));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  keepAgentsviewDaemon(state);
+  const file = path.join(state, ".agentsview", "config.toml");
+  assert.equal(await fs.readFile(file, "utf8"), 'daemon_idle_timeout = "0s"\n');
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  await fs.writeFile(file, 'daemon_idle_timeout = "10m"\n');
+  keepAgentsviewDaemon(state);
+  assert.equal(await fs.readFile(file, "utf8"), 'daemon_idle_timeout = "10m"\n');
 });
