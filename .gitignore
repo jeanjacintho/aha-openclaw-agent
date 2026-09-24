@@ -1,6 +1,7 @@
 docs/
 checks/
 plow-credentials
+plow-mcp-device.json
 node_modules/
 dist/
 .maestri/
