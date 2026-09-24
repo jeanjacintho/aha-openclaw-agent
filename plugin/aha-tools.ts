@@ -159,22 +159,47 @@ function sliceItems(store: Store, role: Role) {
 }
 
 type MemberEntry = { uid: string; providerKey: string; displayName: string };
+// Another Plow agent seen in one of this line's chats. Its line number is the
+// provider_key POST /chats takes as a member; the transport type omits it.
+type AgentEntry = { lineUid: string; providerKey: string; displayName: string };
+type Directory = { members: MemberEntry[]; agents: AgentEntry[] };
 
-async function memberDirectory(account: Account): Promise<MemberEntry[]> {
+async function directory(account: Account): Promise<Directory> {
   const listing = await request<Page<Chat>>(account, "/chats");
   if (listing.has_more) throw new Error("Cannot resolve members from a truncated chat listing");
-  const byUid = new Map<string, MemberEntry>();
+  const members = new Map<string, MemberEntry>();
+  const agents = new Map<string, AgentEntry>();
   for (const chat of listing.data ?? []) {
     for (const person of chat.participants) {
-      if (person.type !== "member" || !person.uid || !person.provider_key) continue;
-      byUid.set(person.uid, { uid: person.uid, providerKey: person.provider_key, displayName: person.display_name || person.uid });
+      if (person.type === "member") {
+        if (!person.uid || !person.provider_key) continue;
+        members.set(person.uid, { uid: person.uid, providerKey: person.provider_key, displayName: person.display_name || person.uid });
+        continue;
+      }
+      const line = person.line as { uid?: string; display_name?: string; provider_key?: string } | undefined;
+      if (person.relationship === "self" || !line?.uid || !line.provider_key) continue;
+      agents.set(line.uid, { lineUid: line.uid, providerKey: line.provider_key, displayName: line.display_name || line.uid });
     }
   }
-  return [...byUid.values()];
+  return { members: [...members.values()], agents: [...agents.values()] };
+}
+
+async function memberDirectory(account: Account): Promise<MemberEntry[]> {
+  return (await directory(account)).members;
 }
 
 function resolveMember(directory: MemberEntry[], memberUid: string): MemberEntry | undefined {
   return directory.find(row => row.uid === memberUid || row.providerKey === memberUid);
+}
+
+type Participant = ({ kind: "member" } & MemberEntry) | ({ kind: "agent" } & AgentEntry);
+
+/** A human by member uid or phone, or another agent by line uid or line number. */
+function resolveParticipant(dir: Directory, ref: string): Participant | undefined {
+  const member = resolveMember(dir.members, ref);
+  if (member) return { kind: "member", ...member };
+  const agent = dir.agents.find(row => row.lineUid === ref || row.providerKey === ref);
+  return agent ? { kind: "agent", ...agent } : undefined;
 }
 
 function claimRoles(store: Store, ctx: Requester): Role[] {
@@ -414,9 +439,28 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_role_groups_create",
     label: "Create AHA role groups",
-    description: "Start a Plow group per role (plow_start_thread contract: POST /chats) and store each chat uid. Owner only.",
-    parameters: { type: "object", additionalProperties: false, properties: {} },
-    async execute() {
+    description: "Start a Plow group per role (plow_start_thread contract: POST /chats) and store each chat uid. Owner only. " +
+      "Other Plow agents join only when the owner explicitly asks for one in a role's group: pass it in agents by line uid.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        agents: {
+          type: "array",
+          description: "Optional. Other Plow agents (line uid or line number) to add to a role's new group. Only on the owner's explicit request.",
+          items: {
+            type: "object",
+            required: ["role", "agent"],
+            additionalProperties: false,
+            properties: {
+              role: { type: "string", enum: [...ROLES] },
+              agent: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      },
+    },
+    async execute(_id, args: { agents?: unknown } = {}) {
       const denied = requireOwner(ctx);
       if (denied) return denied;
       const account = plowAccount(ctx);
@@ -435,16 +479,32 @@ export function registerAhaTools(api: {
         const cfg = getConfig(store);
         if (!cfg) return fail("setup is required");
         const roleChats = { ...cfg.roleChats };
-        const directory = await memberDirectory(account);
+        const dir = await directory(account);
         const assigned = store.db.prepare("SELECT person, role FROM people_roles").all() as { person: string; role: string }[];
+        // Resolved before any group is created, so a bad reference creates nothing.
+        const extra = new Map<Role, AgentEntry[]>();
+        const notAdded: { role: Role; agent: string; reason: string }[] = [];
+        for (const want of Array.isArray(args.agents) ? args.agents as { role?: unknown; agent?: unknown }[] : []) {
+          const role = typeof want?.role === "string" ? want.role : "";
+          const ref = typeof want?.agent === "string" ? want.agent.trim() : "";
+          if (!isRole(role) || !ref) return fail("each agents entry needs a role and an agent");
+          const found = resolveParticipant(dir, ref);
+          if (found?.kind !== "agent") {
+            const known = dir.agents.map(agent => `${agent.lineUid} (${agent.displayName})`).join(", ") || "none";
+            return fail(`unknown agent ${ref}; agents seen in this line's chats: ${known}`);
+          }
+          if (roleChats[role]) { notAdded.push({ role, agent: found.lineUid, reason: "the role's group already exists" }); continue; }
+          extra.set(role, [...(extra.get(role) ?? []), found]);
+        }
         for (const role of ROLES) {
           if (roleChats[role]) continue;
           const members = [ownerKey];
           for (const row of assigned.filter(entry => entry.role === role)) {
-            const resolved = resolveMember(directory, row.person);
+            const resolved = resolveMember(dir.members, row.person);
             if (!resolved) return fail(`unknown member ${row.person}`);
             if (!members.includes(resolved.providerKey)) members.push(resolved.providerKey);
           }
+          for (const agent of extra.get(role) ?? []) if (!members.includes(agent.providerKey)) members.push(agent.providerKey);
           const body = `Grupo ${role} do AHA`;
           const idempotencyKey = createHash("sha256").update(JSON.stringify([account.lineUid, role, members, body])).digest("hex");
           const chat = await request<{ uid: string }>(account, "/chats", {
@@ -457,7 +517,7 @@ export function registerAhaTools(api: {
           roleChats[role] = chat.uid;
         }
         saveConfig(store, { ...cfg, roleChats });
-        return ok({ roleChats });
+        return ok(notAdded.length ? { roleChats, notAdded } : { roleChats });
       } catch (error) {
         return fail(error instanceof Error ? error.message : "could not create role groups");
       } finally {
