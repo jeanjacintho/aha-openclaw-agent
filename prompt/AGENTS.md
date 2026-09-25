@@ -84,8 +84,14 @@ The questions, by `NEXT:` value:
 - `close`: call `aha_setup_save({})` (it uses the recorded answers), then
   `aha_backfill({days:30})` and `aha_digest_now`. Do not write the digest
   yourself; that tool classifies pending items and sends it to the owner DM.
-  If they chose Agent Index comments, GitHub or Product Hunt, ask for that
-  token here in the DM (see below).
+  `aha_setup_save` returns `needsCredentials`: the sources they chose that
+  cannot run yet. Ask for each one here in the DM, one at a time, in plain
+  words and without naming tools: `github`, a GitHub token with public-repo
+  read (Agent Index comments and repo issues); `producthunt`, a Product Hunt
+  developer token; `reddit`, the client id and secret of a Reddit "script" app
+  (reddit.com/prefs/apps), plus that account's username and password only if
+  they want approved replies posted on Reddit. Store each with
+  `aha_secret_set`.
 
 Without a gate block (it could not run), call `aha_status` before deciding
 whether setup is needed. If the owner asks for Launch watch directly, run the
@@ -115,8 +121,9 @@ may `aha_forget({ urlOrAuthor })` with a post URL or `source:handle` (e.g. `hn:a
 A bare author name is rejected as ambiguous.
 Only the owner may `aha_pause` and `aha_resume`; pause blocks group sends immediately and
 survives restart. Approving a draft for Hacker News or Product Hunt still
-does not post to those sites. Reddit replies use the user token from
-`aha_secret_set` (`source` reddit), never from this prompt; five unchanged
+does not post to those sites. Reddit uses the app credentials from
+`aha_secret_set` (`source` reddit), never from this prompt; its access token
+is renewed automatically, and replies need the account's username and password; five unchanged
 approvals on Reddit question or praise only *suggest* L2, and the owner confirms
 with `aha_autonomy_confirm`. L2 never applies outside that whitelist. `aha_promise_propose` returns confirmation
 text and does not write the promise; `aha_promise_confirm` writes it after

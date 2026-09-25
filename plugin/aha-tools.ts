@@ -3,7 +3,8 @@ import { deliverDigest, digestNowKey, digestSendReply } from "../aha/digest/deli
 import { sendToChat } from "../aha/notify/plow.ts";
 import { MAX_BACKFILL_DAYS, runBackfill } from "../aha/pipeline/backfill.ts";
 import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
-import { readSecrets, writeSecrets, type Secrets } from "../aha/secrets.ts";
+import { readSecrets, writeSecrets, type RedditCredentials, type Secrets } from "../aha/secrets.ts";
+import { RedditAuthError, redditAuth } from "../aha/sources/reddit-auth.ts";
 import { ahaHome } from "../aha/home.ts";
 import { watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
@@ -112,6 +113,20 @@ const SOURCE_IDS: Record<string, string> = {
   github: "github",
   reddit: "reddit",
 };
+
+// Which aha_secret_set source each watch source reads its credential from.
+const SOURCE_SECRET: Record<string, keyof Secrets> = { "agent-index": "github", github: "github", ph: "productHunt", reddit: "reddit" };
+const SECRET_SOURCE: Record<keyof Secrets, string> = { github: "github", productHunt: "producthunt", reddit: "reddit" };
+
+// Credentials the chosen sources still need, as aha_secret_set source names.
+function missingCredentials(cfg: AhaConfig | null, secrets: Secrets): string[] {
+  const needed = new Set<string>();
+  for (const source of cfg?.sources ?? []) {
+    const field = SOURCE_SECRET[source];
+    if (field && !secrets[field]) needed.add(SECRET_SOURCE[field]);
+  }
+  return [...needed];
+}
 
 function validTimeZone(tz: string) {
   try {
@@ -352,17 +367,20 @@ export function registerAhaTools(api: {
       }
       const store = openStore();
       let company: string;
+      let needsCredentials: string[];
       try {
         const merged = { ...getDraft(store).answers, ...args };
-        company = typeof merged.company === "string" ? merged.company.trim() : "";
+        // After setup, a change passes only its own field; the name stays.
+        company = typeof merged.company === "string" ? merged.company.trim() : getConfig(store)?.company.name ?? "";
         if (!company) return fail("company is required");
         saveConfig(store, mergeSetup(getConfig(store), merged, ownerChatUid));
         clearDraft(store);
+        needsCredentials = missingCredentials(getConfig(store), readSecrets());
       } finally {
         store.close();
       }
       api.logger.info("aha setup saved");
-      return ok({ saved: true, company });
+      return ok({ saved: true, company, needsCredentials });
     },
   }));
 
@@ -421,14 +439,18 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_secret_set",
     label: "Set an AHA source token",
-    description: "Store a source API token. Owner only, and only in the owner DM. Never repeat the token.",
+    description: "Store a source credential. Owner only, and only in the owner DM. Never repeat it. github and producthunt take a token. reddit takes a script app's clientId and clientSecret (renewed automatically), plus the app account's username and password only to post approved replies; they are checked with Reddit before saving.",
     parameters: {
       type: "object",
-      required: ["source", "token"],
+      required: ["source"],
       additionalProperties: false,
       properties: {
         source: { type: "string" },
         token: { type: "string", minLength: 1 },
+        clientId: { type: "string", minLength: 1 },
+        clientSecret: { type: "string", minLength: 1 },
+        username: { type: "string", minLength: 1 },
+        password: { type: "string", minLength: 1 },
       },
     },
     async execute(_id, args) {
@@ -437,9 +459,28 @@ export function registerAhaTools(api: {
       const source = typeof args.source === "string" ? args.source : "";
       const field = secretField(source);
       if (!field) return fail("unknown source");
-      const token = typeof args.token === "string" ? args.token : "";
-      if (!token) return fail("token is required");
+      const text = (key: string) => typeof args[key] === "string" ? (args[key] as string).trim() : "";
       const home = ahaHome();
+      if (field === "reddit") {
+        if (text("token")) return fail("Reddit needs a script app's clientId and clientSecret, not a token: a Reddit token expires in about an hour.");
+        const credentials: RedditCredentials = { clientId: text("clientId"), clientSecret: text("clientSecret") };
+        if (!credentials.clientId || !credentials.clientSecret) return fail("Reddit needs clientId and clientSecret");
+        if (Boolean(text("username")) !== Boolean(text("password"))) return fail("give both username and password, or neither");
+        if (text("username")) Object.assign(credentials, { username: text("username"), password: text("password") });
+        const auth = redditAuth(credentials)!;
+        auth.invalidate();
+        try {
+          await auth.token();
+        } catch (error) {
+          return fail(error instanceof RedditAuthError ? `Reddit refused these credentials (${error.message.replace(/^reddit token request failed: /, "")}); nothing was saved` : "could not reach Reddit; nothing was saved");
+        }
+        writeSecrets(home, { ...readSecrets(home), reddit: credentials });
+        api.logger.info(`aha secret set source=reddit canPost=${auth.canPost}`);
+        return ok({ source: field, set: true, canPost: auth.canPost });
+      }
+      if (["clientId", "clientSecret", "username", "password"].some(key => args[key] !== undefined)) return fail(`${source} takes a token only`);
+      const token = text("token");
+      if (!token) return fail("token is required");
       writeSecrets(home, { ...readSecrets(home), [field]: token });
       api.logger.info(`aha secret set source=${field}`);
       return ok({ source: field, set: true });

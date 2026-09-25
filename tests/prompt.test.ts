@@ -91,3 +91,8 @@ test("the interview records only what the owner said", () => {
   assert.match(prompt, /não responder ainda/);
   assert.match(prompt, /only ever posted after the owner\s+approves them/);
 });
+
+test("the close of setup asks for the credentials the sources still need", () => {
+  assert.match(prompt, /needsCredentials/);
+  assert.match(prompt, /reddit\.com\/prefs\/apps/);
+});

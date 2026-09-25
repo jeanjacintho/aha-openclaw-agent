@@ -88,8 +88,17 @@ Suggested answers for Launch watch:
 - **Sources:** Hacker News and Agent Index comments
 - **Company / product:** the agent or product name as people write it
 - **GitHub token:** required for Agent Index comments; set only in the owner DM
-- **Product Hunt, GitHub product repos, Reddit:** later sources; their tokens
-  also go through `aha_secret_set` in the owner DM
+- **Product Hunt, GitHub product repos:** later sources; their tokens also go
+  through `aha_secret_set` in the owner DM
+- **Reddit:** a "script" app from reddit.com/prefs/apps. Give its client id
+  and secret to `aha_secret_set` (`source` reddit) in the owner DM; the
+  access token is renewed automatically (Reddit's expire in about an hour).
+  Add the app account's username and password only to post approved
+  replies; without them Reddit is watched but never replied to. Credentials
+  are checked with Reddit before they are saved.
+
+At the end of setup the agent asks for the credentials the chosen sources
+still need (`needsCredentials` from `aha_setup_save`).
 
 Any member may ask `aha_status`. Only the owner can save setup, set secrets, or
 run a backfill.

@@ -2,7 +2,8 @@ import { getConfig } from "../config.ts";
 import { sendToChat } from "../notify/plow.ts";
 import { readSecrets } from "../secrets.ts";
 import { type Store } from "../store/db.ts";
-import { REDDIT_USER_AGENT } from "../sources/reddit.ts";
+import { REDDIT_USER_AGENT, withRedditToken } from "../sources/reddit.ts";
+import { RedditAuthError, redditAuth, type RedditAuth } from "../sources/reddit-auth.ts";
 import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
 
 export { redditSubreddit, redditThreadId, threadLedgerKey, postLedgerKey } from "./reddit-url.ts";
@@ -15,6 +16,7 @@ export type PostDeps = {
   fetch?: typeof fetch;
   now?: () => Date;
   token?: string;
+  auth?: RedditAuth;
 };
 
 const COMMENT = "https://oauth.reddit.com/api/comment";
@@ -136,21 +138,28 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
     return claimed;
   }
-  const token = deps.token ?? readSecrets().reddit ?? "";
-  if (!token) {
+  const http = deps.fetch ?? fetch;
+  const auth = deps.auth ?? redditAuth(deps.token ?? readSecrets().reddit, { fetch: http });
+  // Posting needs a token for the account: an app-only token can only search.
+  if (!auth?.canPost) {
     finish(store, key, thread, "failed", item.url);
     return "failed";
   }
-  const http = deps.fetch ?? fetch;
   const body = new URLSearchParams({ api_type: "json", thing_id: item.externalId, text: draft.body }).toString();
   let response: Response;
   try {
-    response = await http(COMMENT, {
+    // A 401 means Reddit refused the token, so nothing was posted and a
+    // renewed token may try once more.
+    response = await withRedditToken(auth, token => http(COMMENT, {
       method: "POST",
       headers: { ...oauthHeaders(token), "Content-Type": "application/x-www-form-urlencoded" },
       body,
-    });
-  } catch {
+    }));
+  } catch (error) {
+    if (error instanceof RedditAuthError) {
+      finish(store, key, thread, "failed", item.url);
+      return "failed";
+    }
     finish(store, key, thread, "uncertain", item.url);
     await notifyUncertain(store, draft.itemId, key, deps);
     return "uncertain";
@@ -182,7 +191,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     : item.url;
   finish(store, key, thread, "posted", postedUrl);
   try {
-    if (await verify(http, token, parsed.id)) {
+    if (await verify(http, await auth.token(), parsed.id)) {
       finish(store, key, thread, "verified", postedUrl);
     }
   } catch {

@@ -1,8 +1,9 @@
 import { uniqueTermsCaseInsensitive } from "./hn.ts";
 import { retryAfterMs } from "./http.ts";
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
+import { REDDIT_USER_AGENT, RedditAuthError, redditAuth, type RedditAuth } from "./reddit-auth.ts";
 
-export const REDDIT_USER_AGENT = "web:aha-openclaw-agent:v0.1.0 (by /u/aha-watch)";
+export { REDDIT_USER_AGENT };
 const SEARCH = "https://oauth.reddit.com/search";
 
 type Child = {
@@ -70,16 +71,25 @@ function oauthHeaders(token: string) {
   };
 }
 
-export function redditSource(opts: { fetch?: typeof fetch; token?: string } = {}): SourceAdapter {
+// A request with a token that is renewed first when close to expiry, and once
+// more if Reddit still answers 401 (revoked or expired early).
+export async function withRedditToken(auth: RedditAuth, send: (token: string) => Promise<Response>): Promise<Response> {
+  const first = await send(await auth.token());
+  if (first.status !== 401) return first;
+  auth.invalidate();
+  return send(await auth.token());
+}
+
+export function redditSource(opts: { fetch?: typeof fetch; token?: string; auth?: RedditAuth } = {}): SourceAdapter {
   const http = opts.fetch ?? fetch;
-  const token = opts.token ?? "";
+  const auth = opts.auth ?? (opts.token ? redditAuth(opts.token) : undefined);
   return {
     id: "reddit",
     enabled() {
-      return token.length > 0;
+      return Boolean(auth);
     },
     async fetch(query: SourceQuery, cursor: string | null): Promise<FetchResult> {
-      if (!token) return { ok: false, error: "auth" };
+      if (!auth) return { ok: false, error: "auth" };
       const terms = uniqueTermsCaseInsensitive(query.terms);
       if (terms.length === 0) return { ok: true, items: [], nextCursor: null };
       const state = parseCursor(cursor);
@@ -87,7 +97,13 @@ export function redditSource(opts: { fetch?: typeof fetch; token?: string } = {}
       const term = terms[boundedIndex];
       const url = `${SEARCH}?q=${encodeURIComponent(term)}&sort=new&type=comment&limit=100${state.after ? `&after=${encodeURIComponent(state.after)}` : ""}`;
       try {
-        const response = await http(url, { headers: oauthHeaders(token) });
+        let response: Response;
+        try {
+          response = await withRedditToken(auth, token => http(url, { headers: oauthHeaders(token) }));
+        } catch (error) {
+          if (error instanceof RedditAuthError) return { ok: false, error: "auth" };
+          throw error;
+        }
         if (response.status === 429) return { ok: false, error: "rate_limited", retryAfterMs: retryAfterMs(response.headers) };
         if (response.status === 401 || response.status === 403) return { ok: false, error: "auth" };
         if (!response.ok) return { ok: false, error: "unknown" };
