@@ -27,12 +27,28 @@ export function termsFrom(cfg: AhaConfig) {
   return result;
 }
 
+function escapeRegExp(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// A name counts only as a whole word: "plow" matches "Plow", "plow's" and
+// "plow.co", not "plowshares", "plowed" or "snowplow". Letters and digits on
+// either side make it part of another word.
+export function mentionsTerm(text: string, term: string) {
+  const needle = term.trim();
+  if (!needle) return false;
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, "iu").test(text);
+}
+
 export function passesFilter1(item: RawItem, cfg: AhaConfig) {
   // The url is left out of the searched text: a domain like "plow-pbc" can
   // appear in a source's own URL (e.g. the Agent Index repo path) without the
   // content itself mentioning the company, which used to let unrelated items
   // pass by accident.
-  const hay = `${item.title ?? ""} ${item.body}`.toLowerCase();
+  const text = `${item.title ?? ""} ${item.body}`;
+  const hay = text.toLowerCase();
+  // Negatives stay substring matches: they are exclusions the owner chose, and
+  // excluding "plowing" should also exclude "plowings".
   const negative = (cfg.company.negative ?? []).map(word => word.toLowerCase());
   const passesNegative = !negative.some(word => word && hay.includes(word));
   // Agent Index comments already live inside an `agent:<slug>` discussion for
@@ -40,8 +56,7 @@ export function passesFilter1(item: RawItem, cfg: AhaConfig) {
   // repo, so they are on-topic by construction; only the negative word check
   // still applies (spec §6.2 is about disambiguating a bare mention).
   if (item.source === "agent-index" || item.source === "github") return passesNegative;
-  const aliases = termsFrom(cfg).map(term => term.toLowerCase());
-  if (!aliases.some(term => hay.includes(term))) return false;
+  if (!termsFrom(cfg).some(term => mentionsTerm(text, term))) return false;
   return passesNegative;
 }
 
