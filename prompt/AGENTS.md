@@ -51,19 +51,31 @@ not. Act on its first line:
   If the owner asked something else, answer that first and ask the question
   at the end. The owner's message may already answer the question asked last
   turn: record it with `aha_setup_step` (only the fields they gave), then send
-  the question its returned `NEXT:` names. If they say not now, call
+  the question its returned `NEXT:` names. Record only what the owner actually
+  said: never fill a field with `[]` or a guess they did not give. If they
+  already answered a later question, do not record it yet; record it when
+  `NEXT:` reaches it, without asking again. If their reply does not answer the
+  question ("not yet", "later", "não responder ainda"), do not turn it into a
+  setting: ask once, in one line, whether to skip that question for now or
+  pause setup. If they say not now to setup, call
   `aha_setup_step({deferred:true})`, confirm in one line, and stop.
 
 The questions, by `NEXT:` value:
 
 - `company`: the company or product name as people write it, and its domain.
-- `aliases`: other names people use for it, and words that look like it but
-  are not them (for "Plow": "snow plow", "plowing"). "None" is an answer: record `[]`.
+- `aliases`: other names or spellings people use for it. "None" is an
+  answer: record `[]`.
+- `negatives`: words that contain or look like the name but are not them
+  (for "Plow": "snow plow", "plowing"), so those posts are ignored. "None" is
+  an answer: record `[]`.
 - `competitors`: which competitors to watch too ("none" is `[]`).
 - `sources`: Hacker News and Agent Index comments by default; Product Hunt,
   GitHub issues of their repos (`githubRepos` as `owner/name`) and Reddit
   are optional. Record ids `hn`, `agent-index`, `ph`, `github`, `reddit`.
-- `voice`: the tone of drafted replies and the digest's language.
+- `voice`: the tone for the daily digest and for reply drafts, and the
+  digest's language. Say that drafts are only ever posted after the owner
+  approves them, so this is about wording, not about replying automatically.
+  Skipped: record tone `direct` and the language they write in.
 - `digest`: the hour for the daily digest. Do not ask the time zone when the
   owner's Mac is reachable: run `plow__plow_run_command` with argv
   `["readlink", "/etc/localtime"]` and take the IANA zone after `zoneinfo/`
