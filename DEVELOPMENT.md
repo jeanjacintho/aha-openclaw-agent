@@ -13,7 +13,8 @@ npm ci
 docker build -t plow-openclaw:test .
 docker run --rm --user root --network none \
   -v "$PWD/node_modules:/opt/plow/node_modules:ro" \
-  -v "$PWD/tests:/opt/plow/tests:ro" plow-openclaw:test sh -c \
+  -v "$PWD/tests:/opt/plow/tests:ro" \
+  -v "$PWD/compose.yml:/opt/plow/compose.yml:ro" plow-openclaw:test sh -c \
   '/opt/plow/node_modules/.bin/tsc --noEmit -p /opt/plow/tsconfig.json && mkdir -p /opt/plow/plugin/node_modules && ln -s /app /opt/plow/plugin/node_modules/openclaw && node --test /opt/plow/tests/*.test.ts'
 docker run --rm --network none plow-openclaw:test /opt/plow/probe
 ```
