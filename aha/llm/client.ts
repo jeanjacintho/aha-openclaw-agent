@@ -2,8 +2,8 @@ import { recordUsage } from "../usage/ledger.ts";
 import { wrapPublicPosts } from "./prompts.ts";
 import { type Schema } from "./schemas.ts";
 
-const GLM = "z-ai/glm-5.2";
-const SONNET = "anthropic/claude-sonnet-5";
+// Same order as the gateway's primary and fallbacks in boot/config.ts.
+const MODELS = ["moonshotai/kimi-k2.5", "z-ai/glm-5.2", "anthropic/claude-sonnet-5"];
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export type CompleteRequest<T> = {
@@ -99,20 +99,25 @@ function record(model: string, purpose: string, payload: ChatResponse) {
 }
 
 export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = {}): Promise<CompleteResult<T>> {
-  let payload: ChatResponse;
-  let model = GLM;
+  let payload: ChatResponse | undefined;
+  let model = MODELS[0];
   try {
-    try {
-      payload = await callModel(GLM, req, deps);
-    } catch (error) {
-      if ((error as Error).message === "timeout" || (error as Error).name === "TimeoutError") throw error;
-      model = SONNET;
-      payload = await callModel(SONNET, req, deps);
+    for (const [i, candidate] of MODELS.entries()) {
+      model = candidate;
+      try {
+        payload = await callModel(candidate, req, deps);
+        break;
+      } catch (error) {
+        // A timeout has already spent the budget; only request errors fall through.
+        if ((error as Error).message === "timeout" || (error as Error).name === "TimeoutError") throw error;
+        if (i === MODELS.length - 1) throw error;
+      }
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown";
     return { ok: false, reason };
   }
+  if (!payload) return { ok: false, reason: "unknown" };
   try {
     record(model, req.purpose, payload);
     return { ok: true, value: req.schema.parse(parseJson(contentOf(payload))) };
