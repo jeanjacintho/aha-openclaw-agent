@@ -1,10 +1,20 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { ahaHome } from "./home.ts";
 
+// A Reddit "script" app. username and password (of the account that owns the
+// app) are needed only to post replies; searching works without them.
+export type RedditCredentials = {
+  clientId: string;
+  clientSecret: string;
+  username?: string;
+  password?: string;
+};
+
 export type Secrets = {
   productHunt?: string;
   github?: string;
-  reddit?: string;
+  // A string is a bearer token stored before credentials were supported.
+  reddit?: string | RedditCredentials;
 };
 
 function secretsPath(home: string) {

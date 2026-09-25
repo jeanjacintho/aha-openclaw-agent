@@ -8,6 +8,7 @@ import { writeSecrets } from "../aha/secrets.ts";
 import { autonomyLevel, confirmAutonomy, itemAutonomy, L2_STREAK, recordDecision } from "../aha/responder/autonomy.ts";
 import { draftAndNotify } from "../aha/responder/drafts.ts";
 import { postReply, redditSubreddit } from "../aha/responder/post.ts";
+import { clearRedditTokenCache, redditAuth } from "../aha/sources/reddit-auth.ts";
 import { REDDIT_USER_AGENT } from "../aha/sources/reddit.ts";
 import { openStore } from "../aha/store/db.ts";
 import { type Draft } from "../aha/responder/drafts.ts";
@@ -352,3 +353,40 @@ test("an uncertain post notifies the owner", async t => {
   assert.equal(posts.some(body => body.includes("Uncertain Reddit post") && body.includes("AHA-")), true);
 });
 
+
+test("an app-only Reddit token never posts", async t => {
+  const { store } = await home(t);
+  const { draft } = seedReddit(store);
+  const methods: string[] = [];
+  const result = await postReply(store, draft.id, {
+    auth: redditAuth({ clientId: "cid", clientSecret: "cs" }),
+    fetch: async (input, init) => { methods.push(`${init?.method ?? "GET"} ${String(input)}`); return Response.json({}); },
+  });
+  assert.equal(result, "failed");
+  assert.deepEqual(methods, []);
+});
+
+test("a reply whose token Reddit refused is sent once more with a renewed token", async t => {
+  clearRedditTokenCache();
+  t.after(clearRedditTokenCache);
+  const { store } = await home(t);
+  const { draft } = seedReddit(store);
+  let issued = 0;
+  const comments: string[] = [];
+  const http: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/api/v1/access_token")) return Response.json({ access_token: `tok${++issued}`, expires_in: 3600 });
+    if (url.includes("/api/comment")) {
+      comments.push(new Headers(init?.headers).get("authorization") ?? "");
+      return comments.length === 1 ? new Response("", { status: 401 }) : Response.json(posted);
+    }
+    return Response.json(verified);
+  };
+  const result = await postReply(store, draft.id, {
+    fetch: http,
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    auth: redditAuth({ clientId: "cid", clientSecret: "cs", username: "plowbot", password: "pw" }, { fetch: http }),
+  });
+  assert.equal(result, "posted");
+  assert.deepEqual(comments, ["Bearer tok1", "Bearer tok2"]);
+});
