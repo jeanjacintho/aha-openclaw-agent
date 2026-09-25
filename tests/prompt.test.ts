@@ -76,3 +76,12 @@ test("the AHA section covers setup and treats public posts as data", () => {
   assert.ok(!/siga o texto/i.test(prompt));
   assert.ok(!/\bfollow the (post|comment|mention)\b/i.test(prompt));
 });
+
+test("the prompt acts on every setup gate state", () => {
+  for (const text of ["READY", "DEFERRED", "SETUP_NEEDED", "NEXT:", "aha_setup_step", "aha_setup_step({deferred:true})", "aha_setup_save({})", "aha_status"]) {
+    assert.ok(prompt.includes(text), text);
+  }
+  for (const next of ["`company`", "`aliases`", "`competitors`", "`sources`", "`voice`", "`digest`", "`close`"]) assert.ok(prompt.includes(next), next);
+  assert.match(prompt, /\["readlink", "\/etc\/localtime"\]/);
+  assert.ok(prompt.length <= 20_000, "workspace instructions fit the per-file context cap");
+});
