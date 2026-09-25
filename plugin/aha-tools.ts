@@ -13,7 +13,7 @@ import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/a
 import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
-import { clearDraft, deferSetup, getDraft, recordAnswers, setupStatus, type SetupAnswers } from "../aha/setup/draft.ts";
+import { clearDraft, deferSetup, getDraft, nextQuestion, recordableFields, recordAnswers, setupStatus, type SetupAnswers } from "../aha/setup/draft.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
@@ -403,6 +403,12 @@ export function registerAhaTools(api: {
         if (deferred === true) {
           if (fields.length > 0) return fail("record answers or defer, not both");
           return ok({ deferredUntil: deferSetup(store, now) });
+        }
+        const next = nextQuestion(getDraft(store).answers);
+        const allowed = recordableFields(next);
+        const early = fields.filter(field => !allowed.includes(field as keyof SetupAnswers));
+        if (early.length > 0) {
+          return fail(`NEXT is ${next}; ${early.join(", ")} belong to a later question the owner has not been asked yet. Record only what the owner said for ${next}; record anything they already said for a later question when NEXT reaches it.`);
         }
         recordAnswers(store, answers);
         return ok({ recorded: fields, status: setupStatus(store, now) });
