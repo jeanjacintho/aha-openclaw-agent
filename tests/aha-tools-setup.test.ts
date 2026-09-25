@@ -22,6 +22,9 @@ type ToolCtx = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   nativeChannelId?: string;
+  sessionKey?: string;
+  agentAccountId?: string;
+  deliveryContext?: { to?: string };
 };
 
 const owner = { type: "member", uid: "owner", role: "owner", display_name: "Owner" };
@@ -422,4 +425,32 @@ test("aha_setup_step refuses once a watch is saved", async t => {
   const result = await map.get("aha_setup_step")!.execute("call", { company: "Other" });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /already saved/);
+});
+
+test("the owner's DM is recognized from what OpenClaw sends for a direct turn", async t => {
+  const dir = await home(t);
+  // A direct turn carries no nativeChannelId; the owner's session and the
+  // delivery target still say where the call comes from.
+  const bySession = await tools({ senderIsOwner: true, requesterSenderId: "plow-owner", sessionKey: "agent:main:main", agentAccountId: "chat" }).get("aha_setup_step")!.execute("call", { company: "Plow" });
+  assert.equal(bySession.isError ?? false, false, JSON.stringify(bySession));
+  const byTarget = await tools({ senderIsOwner: true, requesterSenderId: "plow-owner", deliveryContext: { to: "plow:cht_dm" } }).get("aha_setup_step")!.execute("call", { domain: "plow.co" });
+  assert.equal(byTarget.isError ?? false, false, JSON.stringify(byTarget));
+  const bySentinel = await tools({ senderIsOwner: true, deliveryContext: { to: "plow-owner" } }).get("aha_secret_set")!.execute("call", { source: "github", token: "ghs_dm" });
+  assert.equal(bySentinel.isError ?? false, false, JSON.stringify(bySentinel));
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:company,domain\nNEXT:aliases");
+});
+
+test("the owner outside their DM is still refused", async t => {
+  const dir = await home(t);
+  for (const ctx of [
+    { senderIsOwner: true, nativeChannelId: "cht_group", sessionKey: "agent:main:main" },
+    { senderIsOwner: true, deliveryContext: { to: "plow:cht_group" }, sessionKey: "agent:main:main" },
+    { senderIsOwner: true, sessionKey: "agent:main:plow:group:cht_group" },
+    { senderIsOwner: true, sessionKey: "agent:main:main", agentAccountId: "email" },
+    { senderIsOwner: false, sessionKey: "agent:main:main" },
+  ] as ToolCtx[]) {
+    const result = await tools(ctx).get("aha_setup_step")!.execute("call", { company: "Plow" });
+    assert.equal(result.isError, true, JSON.stringify(ctx));
+  }
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:none\nNEXT:company");
 });

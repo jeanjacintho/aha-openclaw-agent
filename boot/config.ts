@@ -57,7 +57,10 @@ export function renderConfig(identity: Identity, apiBase: string) {
       profile: "messaging",
       fs: { workspaceOnly: true },
       sessions: { visibility: "tree" },
-      alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"],
+      // The messaging profile hides plugin tools unless they are named here. The
+      // aha_* tools check the requester's role in code (owner-only setup,
+      // secrets, backfill), so every sender may see them.
+      alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread", "aha_*"],
       deny: ["ask_user"],
       toolsBySender: {
         "id:plow-owner": {},
