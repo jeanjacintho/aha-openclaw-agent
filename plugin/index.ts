@@ -4,7 +4,7 @@ import { defineChannelPluginEntry, type ChannelPlugin, type PluginRuntime, type 
 import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, type Account, type Chat, type Message, type TurnOutcome } from "./transport.ts";
 import { registerAhaTools } from "./aha-tools.ts";
-import { gateContext, isOwnerDm, isOwnerDmTurn, runGate } from "./setup-gate.ts";
+import { gateContext, isOwnerDm, isOwnerDmTurn, runGate, skipReason } from "./setup-gate.ts";
 
 let runtime: PluginRuntime;
 const activeTurn = new AsyncLocalStorage<{ chat: Chat; messageUid: string; accountId?: string; deliveryUnknown?: boolean; replyDelivered?: boolean }>();
@@ -164,7 +164,11 @@ export default defineChannelPluginEntry({
     api.on("before_prompt_build", async (_event, ctx) => {
       const turn = activeTurn.getStore();
       const inDispatch = Boolean(turn && turn.accountId === "chat" && isOwnerDm(turn.chat));
-      if (!inDispatch && !isOwnerDmTurn(ctx)) return;
+      if (!inDispatch && !isOwnerDmTurn(ctx)) {
+        const reason = skipReason(ctx, inDispatch);
+        if (reason) api.logger.info(reason);
+        return;
+      }
       const output = runGate();
       // One line per owner turn, so a live run shows what the gate injected.
       api.logger.info(output ? `aha setup gate: ${output.split("\n").filter(line => !line.startsWith("UNTIL:")).join(" ")}` : "aha setup gate unavailable; prompt fallback applies");

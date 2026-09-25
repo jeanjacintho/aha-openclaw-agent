@@ -7,7 +7,7 @@ import { saveConfig } from "../aha/config.ts";
 import { clearDraft, deferSetup, getDraft, nextQuestion, recordAnswers, setupStatus, SETUP_DEFER_MS } from "../aha/setup/draft.ts";
 import { openStore } from "../aha/store/db.ts";
 import entry from "../plugin/index.ts";
-import { gateContext, isOwnerDm, isOwnerDmTurn, OWNER_DM_SESSION, runGate } from "../plugin/setup-gate.ts";
+import { gateContext, isOwnerDm, isOwnerDmTurn, OWNER_DM_SESSION, runGate, skipReason } from "../plugin/setup-gate.ts";
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -98,6 +98,10 @@ test("setup belongs to the owner's solo DM only", () => {
   assert.equal(isOwnerDm(chat(self, guest)), false);
   assert.equal(isOwnerDmTurn({ channel: "plow", accountId: "chat", sessionKey: OWNER_DM_SESSION, trigger: "user" }), true);
   assert.equal(isOwnerDmTurn({ channel: "plow", sessionKey: OWNER_DM_SESSION }), true);
+  // A live owner turn: the channel field is not what the check can rely on.
+  assert.equal(isOwnerDmTurn({ sessionKey: OWNER_DM_SESSION, trigger: "user" }), true);
+  assert.equal(isOwnerDmTurn({ channel: "webchat", sessionKey: OWNER_DM_SESSION, trigger: "user" }), true);
+  assert.equal(isOwnerDmTurn({ channel: "plow", accountId: "chat", sessionKey: OWNER_DM_SESSION, trigger: "cron" }), false);
   assert.equal(isOwnerDmTurn({ channel: "plow", accountId: "email", sessionKey: OWNER_DM_SESSION }), false);
   assert.equal(isOwnerDmTurn({ channel: "plow", accountId: "chat", sessionKey: "agent:main:plow:group:cht_1" }), false);
   assert.equal(isOwnerDmTurn({ channel: "plow", accountId: "chat", sessionKey: OWNER_DM_SESSION, trigger: "heartbeat" }), false);
@@ -159,4 +163,24 @@ test("the injected context points at the setup rules", () => {
   const text = gateContext("SETUP_NEEDED\nDRAFT:none\nNEXT:company");
   assert.match(text, /SETUP_NEEDED\nDRAFT:none\nNEXT:company/);
   assert.match(text, /AGENTS\.md/);
+});
+
+test("the owner's turn gets the gate even when the hook context has no channel fields", async t => {
+  await home(t);
+  const result = await hook()({}, { sessionKey: OWNER_DM_SESSION, trigger: "user" });
+  assert.match(result?.prependContext ?? "", /SETUP_NEEDED/);
+});
+
+test("a skipped user turn in the owner's session is logged, other skips are not", async t => {
+  await home(t);
+  const logs: string[] = [];
+  const run = hook(logs);
+  assert.equal(await run({}, { channel: "plow", accountId: "email", sessionKey: OWNER_DM_SESSION, trigger: "user", senderId: "plow-owner" }), undefined);
+  const gateLogs = () => logs.filter(line => line.startsWith("aha setup gate"));
+  assert.deepEqual(gateLogs(), ['aha setup gate skipped: {"channel":"plow","accountId":"email","trigger":"user","sessionKey":"agent:main:main","inDispatch":false}']);
+  assert.ok(!gateLogs()[0].includes("plow-owner"));
+  await run({}, { channel: "plow", accountId: "chat", sessionKey: OWNER_DM_SESSION, trigger: "heartbeat" });
+  await run({}, { channel: "plow", accountId: "chat", sessionKey: "agent:main:plow:group:cht_1", trigger: "user" });
+  assert.equal(gateLogs().length, 1);
+  assert.equal(skipReason({ sessionKey: "agent:main:plow:group:cht_1", trigger: "user" }, false), undefined);
 });

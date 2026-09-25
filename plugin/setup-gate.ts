@@ -15,16 +15,27 @@ export function isOwnerDm(chat: Chat): boolean {
     chat.participants.some(p => p.type === "member" && p.role === "owner");
 }
 
-// The owner's phone DM as the hook itself sees it: the gateway can run the
-// turn outside the channel's dispatch, so this is the signal a live turn
-// carries -- the plow chat account, the one session the owner's DM is bound
-// to (boot/config.ts bindings), and a user turn (heartbeats and jobs are not).
+// The owner's phone DM as the hook itself sees it. The gateway runs the turn
+// from its ingress queue, outside the channel's dispatch, so the channel's own
+// turn state is not there. boot/config.ts binds only the owner's phone DM to
+// the main session; heartbeats and jobs share that session but not the user
+// trigger. The channel and account fields are not required: OpenClaw fills
+// them differently per run path, and a live owner turn arrived without the
+// values this check used to demand.
 export const OWNER_DM_SESSION = "agent:main:main";
 export type HookContext = { channel?: string; accountId?: string; sessionKey?: string; trigger?: string };
 
 export function isOwnerDmTurn(ctx: HookContext | undefined): boolean {
-  return ctx?.channel === "plow" && (ctx.accountId ?? "chat") === "chat" &&
-    ctx.sessionKey === OWNER_DM_SESSION && (ctx.trigger === undefined || ctx.trigger === "user");
+  return ctx?.sessionKey === OWNER_DM_SESSION && (ctx.trigger === undefined || ctx.trigger === "user") &&
+    (ctx.accountId === undefined || ctx.accountId === "chat");
+}
+
+// A user turn in the owner's session that the gate still left out is a bug:
+// say so, with the fields that decided it and no sender identifiers.
+export function skipReason(ctx: HookContext | undefined, inDispatch: boolean): string | undefined {
+  if (ctx?.sessionKey !== OWNER_DM_SESSION || (ctx.trigger !== undefined && ctx.trigger !== "user")) return;
+  const fields = { channel: ctx.channel, accountId: ctx.accountId, trigger: ctx.trigger, sessionKey: ctx.sessionKey, inDispatch };
+  return `aha setup gate skipped: ${JSON.stringify(fields)}`;
 }
 
 export function runGate(now = new Date()): string | undefined {
