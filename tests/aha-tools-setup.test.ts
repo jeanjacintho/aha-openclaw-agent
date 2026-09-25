@@ -7,6 +7,7 @@ import { getConfig, saveConfig } from "../aha/config.ts";
 import { deliverDigest, digestNowKey, digestSendReply, scheduledDigestKey } from "../aha/digest/deliver.ts";
 import { readSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
+import { getDraft, setupStatus } from "../aha/setup/draft.ts";
 import { runBackfill } from "../aha/pipeline/backfill.ts";
 import { agentIndexSlug, watchAdapters } from "../aha/sources/watch.ts";
 import entry from "../plugin/index.ts";
@@ -311,4 +312,114 @@ test("worker and tools share the Agent Index slug", () => {
   assert.equal(adapters[2].enabled({ company: { name: "Plow" } }), false);
   assert.equal(adapters[3].enabled({ company: { name: "Plow" } }), false);
   assert.equal(adapters[4].enabled({ company: { name: "Plow" } }), false);
+});
+
+const ownerDm = { senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" };
+
+function status(dir: string) {
+  const store = openStore(dir);
+  try {
+    return setupStatus(store, new Date());
+  } finally {
+    store.close();
+  }
+}
+
+test("aha_setup_step is for the owner, in the owner DM", async t => {
+  const dir = await home(t);
+  const guest = await tools({ senderIsOwner: false, requesterSenderId: "mem_guest", nativeChannelId: "cht_dm" }).get("aha_setup_step")!.execute("call", { company: "Evil" });
+  assert.equal(guest.isError, true);
+  const inGroup = await tools({ ...ownerDm, nativeChannelId: "cht_group" }).get("aha_setup_step")!.execute("call", { company: "Plow" });
+  assert.equal(inGroup.isError, true);
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:none\nNEXT:company");
+});
+
+test("the interview records one answer at a time and aha_setup_save({}) saves them all", async t => {
+  const dir = await home(t);
+  const map = tools(ownerDm);
+  const step = (args: Record<string, unknown>) => map.get("aha_setup_step")!.execute("call", args);
+  const first = await step({ company: "Plow", domain: "plow.co" });
+  assert.deepEqual(first.details, { recorded: ["company", "domain"], status: "SETUP_NEEDED\nDRAFT:company,domain\nNEXT:aliases" });
+  await step({ aliases: ["Plow agents", " plow.co "], negatives: ["snow plow", ""] });
+  await step({ competitors: [] });
+  await step({ sources: ["Hacker News", "agent index", "Product Hunt", "hn"], githubRepos: ["plow-pbc/plow-agents"] });
+  await step({ tone: "direto e cordial", lang: "pt-BR" });
+  const last = await step({ digestHour: 9, tz: "America/Sao_Paulo" });
+  assert.match((last.details as { status: string }).status, /NEXT:close$/);
+  const saved = await map.get("aha_setup_save")!.execute("call", {});
+  assert.equal(saved.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const cfg = getConfig(store);
+  assert.equal(cfg?.company.name, "Plow");
+  assert.equal(cfg?.company.domain, "plow.co");
+  assert.deepEqual(cfg?.company.aliases, ["Plow agents", "plow.co"]);
+  assert.deepEqual(cfg?.company.negative, ["snow plow"]);
+  assert.deepEqual(cfg?.competitors, []);
+  assert.deepEqual(cfg?.sources, ["hn", "agent-index", "ph"]);
+  assert.deepEqual(cfg?.githubRepos, ["plow-pbc/plow-agents"]);
+  assert.equal(cfg?.voice, "direto e cordial");
+  assert.equal(cfg?.language, "pt-BR");
+  assert.equal(cfg?.digestHour, 9);
+  assert.equal(cfg?.tz, "America/Sao_Paulo");
+  assert.equal(cfg?.ownerChatUid, "cht_dm");
+  assert.deepEqual(getDraft(store), { answers: {}, deferredUntil: null });
+  assert.equal(setupStatus(store, new Date()), "READY");
+});
+
+test("aha_setup_save args override recorded answers", async t => {
+  const dir = await home(t);
+  const map = tools(ownerDm);
+  await map.get("aha_setup_step")!.execute("call", { company: "Draft name", lang: "pt-BR" });
+  await map.get("aha_setup_save")!.execute("call", { company: "Plow" });
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(getConfig(store)?.company.name, "Plow");
+  assert.equal(getConfig(store)?.language, "pt-BR");
+});
+
+test("aha_setup_save without a company, passed or recorded, is refused", async t => {
+  const dir = await home(t);
+  const result = await tools(ownerDm).get("aha_setup_save")!.execute("call", { lang: "pt" });
+  assert.equal(result.isError, true);
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:none\nNEXT:company");
+});
+
+test("aha_setup_step rejects answers the config could not use", async t => {
+  const dir = await home(t);
+  const step = tools(ownerDm).get("aha_setup_step")!;
+  for (const [args, message] of [
+    [{}, /at least one answer/],
+    [{ company: "  " }, /company/],
+    [{ digestHour: 24 }, /digestHour/],
+    [{ digestHour: 9.5 }, /digestHour/],
+    [{ tz: "Mars/Olympus" }, /IANA/],
+    [{ sources: ["myspace"] }, /unknown source myspace/],
+    [{ sources: [] }, /at least one source/],
+    [{ githubRepos: ["plow-agents"] }, /owner\/name/],
+    [{ deferred: true, company: "Plow" }, /not both/],
+  ] as [Record<string, unknown>, RegExp][]) {
+    const result = await step.execute("call", args);
+    assert.equal(result.isError, true, JSON.stringify(args));
+    assert.match(result.content[0].text, message);
+  }
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:none\nNEXT:company");
+});
+
+test("not now defers the offer for 24 hours", async t => {
+  const dir = await home(t);
+  const before = Date.now();
+  const result = await tools(ownerDm).get("aha_setup_step")!.execute("call", { deferred: true });
+  const until = Date.parse((result.details as { deferredUntil: string }).deferredUntil);
+  assert.ok(until - before >= 24 * 60 * 60 * 1000 && until - Date.now() <= 24 * 60 * 60 * 1000);
+  assert.match(status(dir), /^DEFERRED\n/);
+});
+
+test("aha_setup_step refuses once a watch is saved", async t => {
+  await home(t);
+  const map = tools(ownerDm);
+  await map.get("aha_setup_save")!.execute("call", setupArgs);
+  const result = await map.get("aha_setup_step")!.execute("call", { company: "Other" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /already saved/);
 });
