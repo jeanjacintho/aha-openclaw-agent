@@ -15,6 +15,7 @@ import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
 import { clearDraft, deferSetup, getDraft, nextQuestion, recordableFields, recordAnswers, setupStatus, type SetupAnswers } from "../aha/setup/draft.ts";
+import { addSite, listSites, removeSite } from "../aha/sites/store.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
@@ -564,6 +565,85 @@ export function registerAhaTools(api: {
         return ok(digestSendReply(result));
       } catch (error) {
         return fail(error instanceof Error ? error.message : "digest failed");
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_sites_add",
+    label: "Watch a specific web page",
+    description: "Add one specific page to the daily Latch site watch. Not a search: only this URL is visited, once a day. Owner only.",
+    parameters: {
+      type: "object",
+      required: ["url"],
+      additionalProperties: false,
+      properties: {
+        url: { type: "string", minLength: 1, description: "https URL of the page to watch, e.g. a competitor's changelog or blog." },
+        label: { type: "string", description: "Short name shown in the digest, e.g. \"Zonk changelog\"." },
+        mode: { type: "string", enum: ["mentions", "all"], description: "mentions (default): only new content that mentions the company or a competitor. all: every new block on the page." },
+      },
+    },
+    async execute(_id, args) {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const url = typeof args.url === "string" ? args.url.trim() : "";
+      if (!url) return fail("url is required");
+      const label = typeof args.label === "string" ? args.label.trim() : undefined;
+      const mode = args.mode === "all" ? "all" : "mentions";
+      const store = openStore();
+      try {
+        const result = addSite(store, url, { label, mode });
+        if (!result.ok) return fail(result.message);
+        return ok({ id: result.site.id, url: result.site.url, label: result.site.label, mode: result.site.mode });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_sites_remove",
+    label: "Stop watching a page",
+    description: "Remove a page from the daily Latch site watch, by id (from aha_sites_list) or URL. Owner only.",
+    parameters: {
+      type: "object",
+      required: ["site"],
+      additionalProperties: false,
+      properties: { site: { type: "string", minLength: 1, description: "A site id from aha_sites_list, or its URL." } },
+    },
+    async execute(_id, args) {
+      const denied = requireOwner(ctx);
+      if (denied) return denied;
+      const ref = typeof args.site === "string" ? args.site.trim() : "";
+      if (!ref) return fail("site is required");
+      const store = openStore();
+      try {
+        const removed = removeSite(store, /^\d+$/.test(ref) ? Number(ref) : ref);
+        if (!removed) return fail("no matching site");
+        return ok({ removed: true });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_sites_list",
+    label: "List watched pages",
+    description: "List the pages the daily Latch site watch visits, with each one's last run status. Any member.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute() {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const store = openStore();
+      try {
+        const sites = listSites(store).map(site => ({
+          id: site.id, url: site.url, label: site.label, mode: site.mode, active: site.active,
+          lastRunAt: site.lastRunAt, lastStatus: site.lastStatus, lastDetail: site.lastDetail,
+        }));
+        return ok({ sites });
       } finally {
         store.close();
       }

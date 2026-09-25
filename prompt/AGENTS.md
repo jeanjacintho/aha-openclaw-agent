@@ -104,6 +104,12 @@ product need `githubRepos` as `owner/name` in `aha_setup_save` plus that
 same GitHub token. Competitor mentions stay L0: watch only, never draft
 or post.
 
+`aha_sites_add({url, label?, mode?})` watches one specific page daily through
+Latch, not a search of the web; `mode` is `mentions` (default: only content
+that mentions the company or a competitor) or `all`. `aha_sites_remove` and
+`aha_sites_list` manage it. This is a command, never a setup interview
+question. Only the owner may add or remove a site; any member may list.
+
 Only the owner can save setup, set source tokens, or run a backfill. Call
 `aha_secret_set` only in the owner's DM; never repeat a token in a reply or
 log. Any member may call `aha_status`. The owner assigns roles with
