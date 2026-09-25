@@ -68,11 +68,17 @@ Launch watch is the setup for a team that just shipped an agent: **Hacker News
 **GitHub token** (public-repo read is enough). Without that token, only Hacker
 News is watched.
 
-After the container is running, text the line as the owner and ask for Launch
-watch. The agent interviews you in at most seven questions (company name,
-aliases, words that are not you, domain, competitors, sources, tone/language,
-digest hour and timezone), then saves setup, backfills up to 30 days, and
-sends the first digest to the owner DM. The Agent Index slug is **not** an
+After the container is running, text the line as the owner. Until a watch is
+saved, the agent offers setup on its own: before each owner DM turn, the
+channel runs a setup gate that tells the model what is recorded and which
+question comes next. It asks one question per message: company and domain,
+aliases and words that are not you, competitors, sources, tone and language,
+then the digest hour. The time zone comes from your Mac through Latch
+when connected, and is asked for only when it is not. It then saves setup,
+backfills up to 30 days, and sends the first digest to the owner DM. Answers
+survive restarts (`setup_draft` in the AHA store). "Not now" pauses the offer
+for 24 hours; asking for Launch watch starts it anyway. An install with a saved
+watch is never interviewed again. The Agent Index slug is **not** an
 interview field: comments use `AGENT_ID` from the environment (`aha` by
 default). In the owner DM, set the GitHub token with `aha_secret_set` (never
 paste a token in a group).
