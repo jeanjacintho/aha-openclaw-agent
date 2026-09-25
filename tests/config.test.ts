@@ -71,6 +71,11 @@ test("Kimi falls back to GLM, then Sonnet, on the Plow provider with explicit ca
   }]);
 });
 
+test("the plow plugin may register its setup gate hook", () => {
+  const config = renderConfig(identity, "http://api:8000");
+  assert.deepEqual(config.plugins.entries.plow, { enabled: true, hooks: { allowConversationAccess: true } });
+});
+
 test("the configured Plow provider permits an operator-controlled private endpoint", () => {
   const config = renderConfig(identity, "http://host.docker.internal:8080");
   assert.equal(config.models.providers.plow.request.allowPrivateNetwork, true);

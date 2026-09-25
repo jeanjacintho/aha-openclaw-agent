@@ -36,7 +36,9 @@ export function renderConfig(identity: Identity, apiBase: string) {
       // trip to the Mac takes 0.9-1.8s. 60s is OpenClaw's own request default.
       requestTimeoutMs: 60_000,
     } } } } : {}),
-    plugins: { load: { paths: ["/opt/plow/plugin"] }, entries: { plow: { enabled: true } } },
+    // The channel runs the Launch watch setup gate in a before_prompt_build hook; OpenClaw
+    // registers conversation hooks of a non-bundled plugin only with this opt-in.
+    plugins: { load: { paths: ["/opt/plow/plugin"] }, entries: { plow: { enabled: true, hooks: { allowConversationAccess: true } } } },
     channels: { plow: {
       apiBase, lineUid: identity.line.uid,
       ...(email?.type === "agent" ? { emailLineUid: email.line.uid } : {}),
