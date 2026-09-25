@@ -11,11 +11,12 @@ function localImports(file: string, text: string) {
     .map(match => path.posix.normalize(path.posix.join(dir, match[1])));
 }
 
-test("build.ts compiles every module boot/main.ts imports", async () => {
+// The gateway loads the plugin on its own, so its imports are walked too.
+test("build.ts compiles every module boot/main.ts and plugin/index.ts import", async () => {
   const build = await read("build.ts");
   const list: string[] = JSON.parse(build.match(/for \(const name of (\[[^\]]*\])/)![1]);
   const seen = new Set<string>();
-  const pending = ["boot/main"];
+  const pending = ["boot/main", "plugin/index"];
   while (pending.length) {
     const name = pending.pop()!;
     if (seen.has(name)) continue;
@@ -25,5 +26,6 @@ test("build.ts compiles every module boot/main.ts imports", async () => {
   assert.ok(seen.has("aha/worker"), "boot/main.ts no longer imports aha/worker");
   assert.ok(seen.has("aha/usage/openclaw-export"));
   assert.ok(seen.has("aha/usage/ledger-export"));
+  assert.ok(seen.has("plugin/setup-gate"));
   for (const name of seen) assert.ok(list.includes(name), `build.ts does not emit ${name}.js`);
 });

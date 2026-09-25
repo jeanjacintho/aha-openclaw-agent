@@ -19,7 +19,7 @@ for (const kind of ["group", "direct", "email"]) for (const role of ["owner", "m
   let toolsDisabled: boolean | undefined;
   let context: { access?: { toolPolicy?: { deny: string[] } }; from: string; sender: { id: string }; conversation: { id: string; routePeer: Peer }; message: { rawBody: string }; supplemental: { channelStructuredContext: { payload: { trusted: boolean; participants: { role: string }[] } }[] } } | undefined;
   let channel: { gateway: { startAccount: (context: object) => Promise<void> } } | undefined;
-  entry.register({ registrationMode: "full", registerTool() {}, logger: { info() {} },
+  entry.register({ registrationMode: "full", on() {}, registerTool() {}, logger: { info() {} },
     registerChannel(value: { plugin: typeof channel }) { channel = value.plugin; },
     runtime: { channel: {
       routing: { resolveAgentRoute: ({ peer }: { peer: Peer }) => { routingPeer = peer; return { sessionKey: "unchanged" }; } },

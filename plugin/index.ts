@@ -4,9 +4,10 @@ import { defineChannelPluginEntry, type ChannelPlugin, type PluginRuntime, type 
 import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, type Account, type Chat, type Message, type TurnOutcome } from "./transport.ts";
 import { registerAhaTools } from "./aha-tools.ts";
+import { gateContext, isOwnerDm, isOwnerDmTurn, runGate } from "./setup-gate.ts";
 
 let runtime: PluginRuntime;
-const activeTurn = new AsyncLocalStorage<{ chat: Chat; messageUid: string; deliveryUnknown?: boolean; replyDelivered?: boolean }>();
+const activeTurn = new AsyncLocalStorage<{ chat: Chat; messageUid: string; accountId?: string; deliveryUnknown?: boolean; replyDelivered?: boolean }>();
 
 async function requestWithDeliveryState<T>(account: Account, path: string, body: unknown): Promise<T> {
   const turn = activeTurn.getStore();
@@ -84,7 +85,7 @@ async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, messag
     media,
   });
   log(`turn ${JSON.stringify({ chat: chat.uid, message: message.uid, first_contact: firstContact, senderId, senderName, senderIsOwner, sessionKey: route.sessionKey })}`);
-  return await activeTurn.run({ chat, messageUid: message.uid }, async () => {
+  return await activeTurn.run({ chat, messageUid: message.uid, accountId: account.accountId }, async () => {
     let failure: unknown;
     let completed = false;
     if (account.accountId === "chat") await request(account, `/chats/${chat.uid}/typing`, { action: "start" }).catch(() => log("typing start failed"));
@@ -159,6 +160,16 @@ export default defineChannelPluginEntry({
   setRuntime: value => { runtime = value; },
   registerFull(api) {
     if (api.registrationMode === "full") api.logger.info("plow channel registered");
+    // The owner's own phone DM starts from the Launch watch setup gate.
+    api.on("before_prompt_build", async (_event, ctx) => {
+      const turn = activeTurn.getStore();
+      const inDispatch = Boolean(turn && turn.accountId === "chat" && isOwnerDm(turn.chat));
+      if (!inDispatch && !isOwnerDmTurn(ctx)) return;
+      const output = runGate();
+      // One line per owner turn, so a live run shows what the gate injected.
+      api.logger.info(output ? `aha setup gate: ${output.split("\n").filter(line => !line.startsWith("UNTIL:")).join(" ")}` : "aha setup gate unavailable; prompt fallback applies");
+      return output ? { prependContext: gateContext(output) } : undefined;
+    });
   },
   registerCapabilities(api) {
     api.registerTool(context => ({

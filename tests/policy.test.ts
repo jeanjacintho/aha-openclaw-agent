@@ -87,7 +87,7 @@ test("native targets preserve opaque UID case and reject names and non-chat IDs"
 
 test("owner-targeted delivery resolves the sentinel to the owner's phone chat", async t => {
   let channel: { outbound: { sendText: (context: object) => Promise<unknown> } };
-  entry.register({ registrationMode: "full", runtime: {}, registerTool() {}, logger: { info() {} },
+  entry.register({ registrationMode: "full", on() {}, runtime: {}, registerTool() {}, logger: { info() {} },
     registerChannel(value: { plugin: typeof channel }) { channel = value.plugin; } });
   process.env.PLOW_AGENT_TOKEN = "test-token";
   const chat = { uid: "cht_home", status: "active", participants: [
@@ -109,7 +109,7 @@ test("owner-targeted delivery resolves the sentinel to the owner's phone chat", 
 
 test("heartbeat owner discovery identifies only the sentinel as a direct destination", () => {
   let channel: { messaging: { inferTargetChatType?: (params: { to: string }) => string | undefined } };
-  entry.register({ registrationMode: "full", runtime: {}, registerTool() {}, logger: { info() {} },
+  entry.register({ registrationMode: "full", on() {}, runtime: {}, registerTool() {}, logger: { info() {} },
     registerChannel(value: { plugin: typeof channel }) { channel = value.plugin; } });
   assert.equal(channel!.messaging.inferTargetChatType?.({ to: "plow-owner" }), "direct");
   assert.equal(channel!.messaging.inferTargetChatType?.({ to: "cht_unknown" }), undefined);
