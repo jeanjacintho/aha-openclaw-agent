@@ -4,7 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { classifyBatch, type ItemRow } from "../aha/pipeline/classify.ts";
+import { classifyBatch, MAX_CLASSIFY_ATTEMPTS, type ItemRow } from "../aha/pipeline/classify.ts";
+import { classifyNewItems } from "../aha/digest/deliver.ts";
 import { classificationSchema } from "../aha/llm/schemas.ts";
 import { openStore } from "../aha/store/db.ts";
 
@@ -158,4 +159,61 @@ test("classifyBatch sends at most 20 items", async t => {
     },
   });
   assert.equal(sent, 20);
+});
+
+test("a null or empty topic falls back to the category instead of rejecting the item", () => {
+  assert.deepEqual(classificationSchema.parse(valid({ relevant: false, category: "other", topic: null })), valid({ relevant: false, category: "other", topic: "other" }));
+  assert.deepEqual(classificationSchema.parse(valid({ topic: "  " })), valid({ topic: "question" }));
+  assert.deepEqual(classificationSchema.parse(valid({ topic: undefined })), valid({ topic: "question" }));
+});
+
+test("a batch where the model leaves every topic null is still classified", async t => {
+  const store = await home(t);
+  const noise = insert(store, { externalId: "1", body: "just plow through it" });
+  const mention = insert(store, { externalId: "2", body: "I use Plow for my agents" });
+  const report = await classifyBatch(store, [noise, mention], {
+    fetch: chatFetch({
+      results: [
+        { id: noise.id, ...valid({ relevant: false, category: "other", topic: null }) },
+        { id: mention.id, ...valid({ category: "praise", topic: null }) },
+      ],
+    }),
+  });
+  assert.deepEqual(report, { classified: 2, needsReview: 0 });
+  const states = store.db.prepare("SELECT state FROM items ORDER BY id").all() as { state: string }[];
+  assert.deepEqual(states.map(row => row.state), ["irrelevant", "relevant"]);
+  const topics = store.db.prepare("SELECT topic FROM classifications ORDER BY item_id").all() as { topic: string }[];
+  assert.deepEqual(topics.map(row => row.topic), ["other", "praise"]);
+});
+
+function itemRow(store: ReturnType<typeof openStore>, id: number) {
+  return store.db.prepare("SELECT state, classify_attempts FROM items WHERE id = ?").get(id) as { state: string; classify_attempts: number };
+}
+
+test("a failed item is retried on later passes and recovers once the model answers", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let answer: unknown = { results: [{ id: item.id, category: "rant" }] };
+  const deps = { complete: async () => ({ ok: true as const, value: answer as { results: { id: number }[] } }) };
+  await classifyNewItems(store, deps);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "needs_review", classify_attempts: 1 });
+  answer = { results: [{ id: item.id, ...valid() }] };
+  await classifyNewItems(store, deps);
+  assert.equal(itemRow(store, item.id).state, "relevant");
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM classifications").get() as { n: number }).n, 1);
+});
+
+test("an item that keeps failing stops being retried after the attempt limit", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let calls = 0;
+  const deps = {
+    complete: async () => {
+      calls += 1;
+      return { ok: false as const, reason: "http 503" };
+    },
+  };
+  for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS + 2; i += 1) await classifyNewItems(store, deps);
+  assert.equal(calls, MAX_CLASSIFY_ATTEMPTS);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "needs_review", classify_attempts: MAX_CLASSIFY_ATTEMPTS });
 });

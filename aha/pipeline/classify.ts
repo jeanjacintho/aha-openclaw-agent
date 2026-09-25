@@ -7,6 +7,8 @@ import { assignTopic, listTopics, topicLabel } from "./topics.ts";
 import { stateFromClassification } from "./relevance.ts";
 
 export const CLASSIFY_BATCH_SIZE = 20;
+// A failed item is classified again on later passes, up to this many attempts in total.
+export const MAX_CLASSIFY_ATTEMPTS = 3;
 
 export type ItemRow = {
   id: number;
@@ -20,6 +22,7 @@ export type ItemRow = {
   published_at: string | null;
   fetched_at: string | null;
   state: string;
+  classify_attempts?: number;
 };
 
 export type ClassifyReport = {
@@ -52,7 +55,7 @@ function aboutAllowed(about: Classification["about"], cfg: AhaConfig) {
 }
 
 function review(store: Store, id: number) {
-  store.db.prepare("UPDATE items SET state = 'needs_review' WHERE id = ?").run(id);
+  store.db.prepare("UPDATE items SET state = 'needs_review', classify_attempts = classify_attempts + 1 WHERE id = ?").run(id);
 }
 
 function save(store: Store, id: number, c: Classification) {
@@ -93,14 +96,18 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     schema: classifyLlmSchema,
   }, deps);
   const byId = new Map<number, Classification>();
+  let rejected: string | undefined;
   if (result.ok) {
     for (const row of result.value.results) {
       try {
         const parsed = parseClassification(row);
-        if (!aboutAllowed(parsed.about, cfg)) continue;
+        if (!aboutAllowed(parsed.about, cfg)) {
+          rejected ??= `about ${parsed.about} is not a configured competitor`;
+          continue;
+        }
         byId.set(row.id, parsed);
-      } catch {
-        /* invalid result stays missing */
+      } catch (error) {
+        rejected ??= error instanceof Error ? error.message : String(error);
       }
     }
   }
@@ -113,6 +120,10 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     }
     save(s, item.id, parsed);
     report.classified += 1;
+  }
+  if (report.needsReview > 0) {
+    const why = result.ok ? rejected ?? "missing from model output" : result.reason;
+    console.error(`aha: classify sent ${report.needsReview}/${batch.length} items to needs_review: ${why}`);
   }
   return report;
 }
