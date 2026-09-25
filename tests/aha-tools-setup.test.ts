@@ -479,6 +479,7 @@ test("aha_setup_step refuses answers to questions the owner was not asked yet", 
   const fix = await step.execute("call", { company: "Plow PBC" });
   assert.equal(fix.isError ?? false, false);
   assert.match((fix.details as { status: string }).status, /NEXT:negatives$/);
+});
 
 test("Reddit takes script-app credentials, checked with Reddit and never echoed", async t => {
   clearRedditTokenCache();
