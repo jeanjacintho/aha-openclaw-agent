@@ -54,12 +54,15 @@ test("provider and optional MCP use environment references, never credential val
   assert.equal(renderConfig(identity, "http://api:8000").mcp, undefined);
 });
 
-test("GLM falls back to Sonnet on the Plow provider with explicit capacity and pricing", () => {
+test("Kimi falls back to GLM, then Sonnet, on the Plow provider with explicit capacity and pricing", () => {
   const config = renderConfig(identity, "http://api:8000");
   assert.deepEqual(config.agents.defaults.model, {
-    primary: "plow/z-ai/glm-5.2", fallbacks: ["plow/anthropic/claude-sonnet-5"],
+    primary: "plow/moonshotai/kimi-k2.5", fallbacks: ["plow/z-ai/glm-5.2", "plow/anthropic/claude-sonnet-5"],
   });
   assert.deepEqual(config.models.providers.plow.models, [{
+    id: "moonshotai/kimi-k2.5", name: "Kimi K2.5", input: ["text"], contextWindow: 262144,
+    cost: { input: 0.57, output: 2.85 },
+  }, {
     id: "z-ai/glm-5.2", name: "GLM 5.2", input: ["text"], contextWindow: 1048576,
     cost: { input: 0.5544, output: 1.7424 },
   }, {
