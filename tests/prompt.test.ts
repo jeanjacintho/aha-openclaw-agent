@@ -96,3 +96,9 @@ test("the close of setup asks for the credentials the sources still need", () =>
   assert.match(prompt, /needsCredentials/);
   assert.match(prompt, /reddit\.com\/prefs\/apps/);
 });
+
+test("site watch is documented as a scoped command, not a general web search", () => {
+  assert.match(prompt, /aha_sites_add/);
+  assert.match(prompt, /never a setup interview\s+question/);
+  assert.match(prompt, /not a search of the web/);
+});
