@@ -23,8 +23,24 @@ type Requester = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   nativeChannelId?: string;
+  sessionKey?: string;
+  agentAccountId?: string;
+  deliveryContext?: { to?: string };
   config?: object;
 };
+
+// The session boot/config.ts binds to the owner's phone DM, and only to it.
+const OWNER_DM_SESSION = "agent:main:main";
+
+// Whether this tool call comes from the owner's DM. OpenClaw sets
+// nativeChannelId for group turns but not for direct ones, so a DM turn is
+// recognized by its delivery target or, failing that, by the owner's session.
+function inOwnerDm(ctx: Requester, ownerUid: string) {
+  if (ctx.nativeChannelId) return ctx.nativeChannelId === ownerUid;
+  const to = ctx.deliveryContext?.to?.replace(/^plow:/i, "");
+  if (to) return to === ownerUid || to === "plow-owner";
+  return ctx.sessionKey === OWNER_DM_SESSION && (ctx.agentAccountId ?? "chat") === "chat";
+}
 
 type ToolResult = {
   isError?: boolean;
@@ -82,8 +98,7 @@ async function requireOwnerDm(ctx: Requester, refusal = "secrets can only be set
   const denied = requireOwner(ctx);
   if (denied) return denied;
   try {
-    const uid = await ownerDmUid(ctx);
-    if (!ctx.nativeChannelId || ctx.nativeChannelId !== uid) return fail(refusal);
+    if (!inOwnerDm(ctx, await ownerDmUid(ctx))) return fail(refusal);
   } catch {
     return fail(refusal);
   }
