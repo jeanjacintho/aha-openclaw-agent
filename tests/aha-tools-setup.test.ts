@@ -8,6 +8,7 @@ import { deliverDigest, digestNowKey, digestSendReply, scheduledDigestKey } from
 import { readSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
 import { getDraft, setupStatus } from "../aha/setup/draft.ts";
+import { clearRedditTokenCache } from "../aha/sources/reddit-auth.ts";
 import { runBackfill } from "../aha/pipeline/backfill.ts";
 import { agentIndexSlug, watchAdapters } from "../aha/sources/watch.ts";
 import entry from "../plugin/index.ts";
@@ -46,6 +47,10 @@ async function home(t: import("node:test").TestContext, posts: { url: string; bo
     const url = String(input);
     const method = init?.method ?? "GET";
     if (url.endsWith("/v1/chats") && method === "GET") return Response.json({ data: [dm, group], has_more: false });
+    if (url === "https://www.reddit.com/api/v1/access_token") {
+      const good = new Headers(init?.headers).get("authorization") === `Basic ${Buffer.from("cid:good").toString("base64")}`;
+      return good ? Response.json({ access_token: "reddit_access", expires_in: 3600 }) : new Response(JSON.stringify({ error: "invalid_grant" }), { status: 401 });
+    }
     if (method === "POST" && url.includes("/messages")) {
       posts.push({ url, body: String(init?.body ?? "") });
       return Response.json({ uid: "msg_digest" });
@@ -474,4 +479,53 @@ test("aha_setup_step refuses answers to questions the owner was not asked yet", 
   const fix = await step.execute("call", { company: "Plow PBC" });
   assert.equal(fix.isError ?? false, false);
   assert.match((fix.details as { status: string }).status, /NEXT:negatives$/);
+
+test("Reddit takes script-app credentials, checked with Reddit and never echoed", async t => {
+  clearRedditTokenCache();
+  t.after(clearRedditTokenCache);
+  const dir = await home(t);
+  const logs: string[] = [];
+  const set = tools(ownerDm, logs).get("aha_secret_set")!;
+  const refused = await set.execute("call", { source: "reddit", clientId: "cid", clientSecret: "wrong" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /refused these credentials \(http 401\); nothing was saved/);
+  assert.equal(readSecrets(dir).reddit, undefined);
+  for (const [args, message] of [
+    [{ source: "reddit", token: "bearer_that_expires" }, /not a token/],
+    [{ source: "reddit", clientId: "cid" }, /clientId and clientSecret/],
+    [{ source: "reddit", clientId: "cid", clientSecret: "good", username: "plowbot" }, /both username and password/],
+    [{ source: "github", clientId: "cid", clientSecret: "good" }, /token only/],
+  ] as [Record<string, unknown>, RegExp][]) {
+    const result = await set.execute("call", args);
+    assert.equal(result.isError, true, JSON.stringify(args));
+    assert.match(result.content[0].text, message);
+  }
+  const saved = await set.execute("call", { source: "reddit", clientId: "cid", clientSecret: "good", username: "plowbot", password: "hunter2" });
+  assert.deepEqual(saved.details, { source: "reddit", set: true, canPost: true });
+  assert.deepEqual(readSecrets(dir).reddit, { clientId: "cid", clientSecret: "good", username: "plowbot", password: "hunter2" });
+  const shown = JSON.stringify(saved) + logs.join("\n");
+  for (const secret of ["good", "hunter2", "reddit_access"]) assert.ok(!shown.includes(secret), secret);
+});
+
+test("saving setup names the chosen sources that still need credentials", async t => {
+  await home(t);
+  const map = tools(ownerDm);
+  await map.get("aha_secret_set")!.execute("call", { source: "producthunt", token: "ph_token" });
+  const saved = await map.get("aha_setup_save")!.execute("call", { company: "Plow", sources: ["hn", "agent-index", "reddit", "ph"] });
+  assert.deepEqual((saved.details as { needsCredentials: string[] }).needsCredentials, ["github", "reddit"]);
+  const none = await map.get("aha_setup_save")!.execute("call", { sources: ["hn"] });
+  assert.deepEqual((none.details as { needsCredentials: string[] }).needsCredentials, []);
+});
+
+test("after setup, aha_setup_save changes one field and keeps the rest", async t => {
+  const dir = await home(t);
+  const map = tools(ownerDm);
+  await map.get("aha_setup_save")!.execute("call", setupArgs);
+  const changed = await map.get("aha_setup_save")!.execute("call", { digestHour: 21 });
+  assert.equal(changed.isError ?? false, false, JSON.stringify(changed));
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(getConfig(store)?.digestHour, 21);
+  assert.equal(getConfig(store)?.company.name, "Plow");
+  assert.deepEqual(getConfig(store)?.competitors, ["zonk"]);
 });
