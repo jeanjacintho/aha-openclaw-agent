@@ -65,7 +65,7 @@ function queryFor(cfg: AhaConfig, now: Date, window?: { since: Date; until: Date
   return { since: new Date(now.getTime() - DAY_MS), until: now, terms: termsFrom(cfg) };
 }
 
-function insertItem(store: Store, item: RawItem, now: Date) {
+export function insertItem(store: Store, item: RawItem, now: Date) {
   return store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new')
     ON CONFLICT (source, external_id) DO NOTHING`).run(
