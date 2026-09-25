@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { ahaHome } from "../home.ts";
 import { recordUsage } from "../usage/ledger.ts";
 import { wrapPublicPosts } from "./prompts.ts";
 import { type Schema } from "./schemas.ts";
@@ -61,7 +63,6 @@ async function callModel(model: string, req: CompleteRequest<unknown>, deps: Com
           { role: "system", content: req.system },
           { role: "user", content: wrapPublicPosts(req.data) },
         ],
-        response_format: { type: "json_object" },
       }),
       signal,
     });
@@ -79,12 +80,44 @@ function contentOf(payload: ChatResponse) {
   return content;
 }
 
-function parseJson(text: string) {
+// How many leading `{` positions extractJson tries before giving up.
+const MAX_OBJECT_STARTS = 5;
+
+function tryParse(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
-    return JSON.parse(text);
+    return { ok: true, value: JSON.parse(text) };
   } catch {
-    throw new Error("invalid json");
+    return { ok: false };
   }
+}
+
+// The Plow gateway has corrupted the start of GLM's JSON-mode output (a stray
+// `{` or `"{` before the real object), and without JSON mode models sometimes
+// wrap the object in a ``` fence. The schema still validates whatever this returns.
+export function extractJson(text: string): unknown {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  for (const candidate of fenced ? [text, fenced[1]] : [text]) {
+    const parsed = tryParse(candidate.trim());
+    if (parsed.ok) return parsed.value;
+  }
+  const end = text.lastIndexOf("}");
+  let start = text.indexOf("{");
+  for (let tried = 0; start !== -1 && start < end && tried < MAX_OBJECT_STARTS; tried += 1) {
+    const parsed = tryParse(text.slice(start, end + 1));
+    if (parsed.ok) return parsed.value;
+    start = text.indexOf("{", start + 1);
+  }
+  throw new Error("invalid json");
+}
+
+// Keeps the last unparseable reply on the state volume so it can be inspected.
+function keepInvalid(purpose: string, model: string, content: string) {
+  try {
+    writeFileSync(`${ahaHome()}/llm-invalid-last.txt`, `${new Date().toISOString()} ${purpose} ${model}\n${content}`);
+  } catch {
+    /* best effort */
+  }
+  console.error(`aha: ${purpose} ${model} returned invalid json (${content.length} chars): ${JSON.stringify(content.slice(0, 200))}`);
 }
 
 function tokens(payload: ChatResponse) {
@@ -121,7 +154,15 @@ export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = 
   if (!payload) return { ok: false, reason: "unknown" };
   try {
     record(model, req.purpose, payload);
-    return { ok: true, value: req.schema.parse(parseJson(contentOf(payload))) };
+    const content = contentOf(payload);
+    let json: unknown;
+    try {
+      json = extractJson(content);
+    } catch (error) {
+      keepInvalid(req.purpose, model, content);
+      throw error;
+    }
+    return { ok: true, value: req.schema.parse(json) };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : "invalid json" };
   }

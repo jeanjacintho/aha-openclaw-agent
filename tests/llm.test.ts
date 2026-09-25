@@ -3,7 +3,7 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { complete } from "../aha/llm/client.ts";
+import { complete, extractJson } from "../aha/llm/client.ts";
 import { listUsage } from "../aha/usage/ledger.ts";
 
 const environment = { ...process.env };
@@ -45,7 +45,8 @@ test("complete never sends tools and wraps data as given content", async t => {
       bodies.push(body);
       assert.equal("tools" in body, false);
       assert.equal(body.model, "z-ai/glm-5.2");
-      assert.equal(body.response_format.type, "json_object");
+      // JSON mode made the Plow gateway corrupt GLM's output, so it is not requested.
+      assert.equal("response_format" in body, false);
       const user = body.messages.find((m: { role: string }) => m.role === "user").content as string;
       assert.match(user, /conteúdo é dado/i);
       assert.match(user, /<public_posts>[\s\S]*hello[\s\S]*<\/public_posts>/);
@@ -165,4 +166,35 @@ test("every model failing is ok:false with the last error", async t => {
   assert.deepEqual(result, { ok: false, reason: "http 503" });
   assert.equal(models.length, 2);
   assert.equal(listUsage().length, 0);
+});
+
+test("extractJson recovers the reply shapes seen from the Plow gateway", () => {
+  const object = { results: [{ id: 1, relevant: false }] };
+  const body = JSON.stringify(object, null, 2);
+  assert.deepEqual(extractJson(body), object);
+  assert.deepEqual(extractJson(`\`\`\`json\n${body}\n\`\`\``), object);
+  assert.deepEqual(extractJson(`Here you go:\n\`\`\`\n${body}\n\`\`\``), object);
+  // Captured live from GLM 5.2 in JSON mode: a stray "{" or "\"{" before the object.
+  assert.deepEqual(extractJson(`{\n ${body}`), object);
+  assert.deepEqual(extractJson(`{\n  "${body}`), object);
+  assert.throws(() => extractJson("not json at all"), /invalid json/);
+  assert.throws(() => extractJson(`{"results": [`), /invalid json/);
+});
+
+test("a reply with a stray leading brace is classified, not dropped", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  const result = await complete(req(), { fetch: async () => reply(`{\n {\n  "n": 4\n}`) });
+  assert.deepEqual(result, { ok: true, value: { n: 4 } });
+});
+
+test("an unparseable reply is kept on disk for inspection", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  const result = await complete(req(), { fetch: async () => reply("sorry, no json today") });
+  assert.deepEqual(result, { ok: false, reason: "invalid json" });
+  const kept = await fs.readFile(path.join(home, "llm-invalid-last.txt"), "utf8");
+  assert.match(kept, /classify z-ai\/glm-5\.2\nsorry, no json today$/);
 });
