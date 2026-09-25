@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { test } from "node:test";
@@ -71,6 +72,14 @@ test("Kimi falls back to GLM, then Sonnet, on the Plow provider with explicit ca
   }]);
 });
 
+test("the tool allowlist exposes every tool the plugin declares", async () => {
+  // The messaging profile hides plugin tools that alsoAllow does not name.
+  const config = renderConfig(identity, "http://api:8000");
+  const manifest = JSON.parse(await readFile(new URL("../plugin/openclaw.plugin.json", import.meta.url), "utf8"));
+  const allowed = (name: string) => config.tools.alsoAllow.some(rule => rule.endsWith("*") ? name.startsWith(rule.slice(0, -1)) : rule === name);
+  for (const name of manifest.contracts.tools as string[]) assert.ok(allowed(name), `${name} is not in tools.alsoAllow`);
+});
+
 test("the plow plugin may register its setup gate hook", () => {
   const config = renderConfig(identity, "http://api:8000");
   assert.deepEqual(config.plugins.entries.plow, { enabled: true, hooks: { allowConversationAccess: true } });
@@ -97,7 +106,7 @@ test("phone turns cannot block on ask_user", () => {
 test("native messaging retains local workspace and memory file tools for the owner only", () => {
   assert.deepEqual(renderConfig(identity, "http://api:8000").tools, {
     profile: "messaging", fs: { workspaceOnly: true }, sessions: { visibility: "tree" },
-    alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread"], deny: ["ask_user"],
+    alsoAllow: ["read", "write", "edit", "exec", "plow_start_thread", "aha_*"], deny: ["ask_user"],
     toolsBySender: { "id:plow-owner": {}, "*": { deny: ["plow__*", "exec", "write", "edit"] } },
   });
 });
