@@ -96,7 +96,9 @@ export function parseClassification(input: unknown): Classification {
   if (confidence < 0 || confidence > 1) fail("confidence must be between 0 and 1");
   const sentiment = num(row.sentiment, "sentiment");
   if (sentiment < -1 || sentiment > 1) fail("sentiment must be between -1 and 1");
-  const topic = str(row.topic, "topic");
+  const cat = category(row.category);
+  // Models leave topic null on off-topic posts; the category is always a valid label.
+  const topic = row.topic == null || (typeof row.topic === "string" && row.topic.trim() === "") ? cat : str(row.topic, "topic");
   const lang = str(row.lang, "lang");
   const reason = str(row.reason, "reason");
   if (badTopic(topic) || hasUrl(lang) || (row.about != null && hasUrl(String(row.about)))) fail("topic must be short text without URLs");
@@ -106,7 +108,7 @@ export function parseClassification(input: unknown): Classification {
     confidence,
     about: aboutVal,
     sentiment,
-    category: category(row.category),
+    category: cat,
     topic,
     lang,
     isQuestion: bool(row.isQuestion, "isQuestion"),
