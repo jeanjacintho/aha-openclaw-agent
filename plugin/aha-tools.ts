@@ -13,6 +13,7 @@ import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/a
 import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
+import { clearDraft, deferSetup, getDraft, recordAnswers, setupStatus, type SetupAnswers } from "../aha/setup/draft.ts";
 import { ownerChat, request, type Account, type Chat, type Page } from "./transport.ts";
 import { createHash } from "node:crypto";
 
@@ -77,15 +78,79 @@ async function ownerDmUid(ctx: Requester) {
   return chat.uid;
 }
 
-async function requireOwnerDm(ctx: Requester) {
+async function requireOwnerDm(ctx: Requester, refusal = "secrets can only be set in the owner DM") {
   const denied = requireOwner(ctx);
   if (denied) return denied;
   try {
     const uid = await ownerDmUid(ctx);
-    if (!ctx.nativeChannelId || ctx.nativeChannelId !== uid) return fail("secrets can only be set in the owner DM");
+    if (!ctx.nativeChannelId || ctx.nativeChannelId !== uid) return fail(refusal);
   } catch {
-    return fail("secrets can only be set in the owner DM");
+    return fail(refusal);
   }
+}
+
+// The source ids the watch knows, and the spellings an owner might answer with.
+const SOURCE_IDS: Record<string, string> = {
+  hn: "hn", hackernews: "hn",
+  agentindex: "agent-index",
+  ph: "ph", producthunt: "ph",
+  github: "github",
+  reddit: "reddit",
+};
+
+function validTimeZone(tz: string) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function trimmedList(value: unknown) {
+  return strings(value)?.map(item => item.trim()).filter(Boolean);
+}
+
+// One interview answer, checked the way the saved config will need it.
+function setupAnswers(args: Record<string, unknown>): SetupAnswers | string {
+  const answers: SetupAnswers = {};
+  for (const key of ["company", "domain", "tone", "lang"] as const) {
+    if (args[key] === undefined) continue;
+    const text = typeof args[key] === "string" ? args[key].trim() : "";
+    if (!text) return `${key} must be non-empty text`;
+    answers[key] = text;
+  }
+  for (const key of ["aliases", "negatives", "competitors"] as const) {
+    if (args[key] !== undefined) answers[key] = trimmedList(args[key]) ?? [];
+  }
+  if (args.sources !== undefined) {
+    const sources: string[] = [];
+    for (const raw of trimmedList(args.sources) ?? []) {
+      const id = SOURCE_IDS[raw.toLowerCase().replace(/[\s_-]+/g, "")];
+      if (!id) return `unknown source ${raw}; use hn, agent-index, ph, github or reddit`;
+      if (!sources.includes(id)) sources.push(id);
+    }
+    if (sources.length === 0) return "pick at least one source";
+    answers.sources = sources;
+  }
+  if (args.githubRepos !== undefined) {
+    const repos = trimmedList(args.githubRepos) ?? [];
+    const bad = repos.find(repo => !/^[\w.-]+\/[\w.-]+$/.test(repo));
+    if (bad) return `githubRepos must be owner/name, not ${bad}`;
+    answers.githubRepos = repos;
+  }
+  if (args.digestHour !== undefined) {
+    if (typeof args.digestHour !== "number" || !Number.isInteger(args.digestHour) || args.digestHour < 0 || args.digestHour > 23) {
+      return "digestHour must be an integer from 0 to 23";
+    }
+    answers.digestHour = args.digestHour;
+  }
+  if (args.tz !== undefined) {
+    const tz = typeof args.tz === "string" ? args.tz.trim() : "";
+    if (!tz || !validTimeZone(tz)) return "tz must be an IANA time zone such as America/Sao_Paulo";
+    answers.tz = tz;
+  }
+  return answers;
 }
 
 function mergeSetup(previous: AhaConfig | null, args: Record<string, unknown>, ownerChatUid: string): AhaConfig {
@@ -242,10 +307,9 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_setup_save",
     label: "Save AHA setup",
-    description: "Save the company watch configuration from the setup interview. Owner only. Pins the owner DM from the host, not the chat that called the tool.",
+    description: "Save the company watch configuration. Owner only. Answers recorded with aha_setup_step are used for any field not passed here, and the draft is cleared once saved. Pins the owner DM from the host, not the chat that called the tool.",
     parameters: {
       type: "object",
-      required: ["company"],
       additionalProperties: false,
       properties: {
         company: { type: "string", minLength: 1 },
@@ -265,8 +329,6 @@ export function registerAhaTools(api: {
     async execute(_id, args) {
       const denied = requireOwner(ctx);
       if (denied) return denied;
-      const company = typeof args.company === "string" ? args.company.trim() : "";
-      if (!company) return fail("company is required");
       let ownerChatUid: string;
       try {
         ownerChatUid = await ownerDmUid(ctx);
@@ -274,13 +336,64 @@ export function registerAhaTools(api: {
         return fail(error instanceof Error ? error.message : "cannot resolve owner DM");
       }
       const store = openStore();
+      let company: string;
       try {
-        saveConfig(store, mergeSetup(getConfig(store), args, ownerChatUid));
+        const merged = { ...getDraft(store).answers, ...args };
+        company = typeof merged.company === "string" ? merged.company.trim() : "";
+        if (!company) return fail("company is required");
+        saveConfig(store, mergeSetup(getConfig(store), merged, ownerChatUid));
+        clearDraft(store);
       } finally {
         store.close();
       }
       api.logger.info("aha setup saved");
       return ok({ saved: true, company });
+    },
+  }));
+
+  api.registerTool(ctx => ({
+    name: "aha_setup_step",
+    label: "Record a Launch watch setup answer",
+    description: "Record the owner's answer to one Launch watch setup question, or deferred:true when they say not now (setup is offered again after 24 hours). Owner only, owner DM only. Returns the setup status with the next question.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        company: { type: "string", minLength: 1 },
+        domain: { type: "string" },
+        aliases: { type: "array", items: { type: "string" } },
+        negatives: { type: "array", items: { type: "string" } },
+        competitors: { type: "array", items: { type: "string" } },
+        sources: { type: "array", items: { type: "string" } },
+        githubRepos: { type: "array", items: { type: "string" } },
+        tone: { type: "string" },
+        lang: { type: "string" },
+        digestHour: { type: "integer", minimum: 0, maximum: 23 },
+        tz: { type: "string" },
+        deferred: { type: "boolean" },
+      },
+    },
+    async execute(_id, args) {
+      const denied = await requireOwnerDm(ctx, "setup is done in the owner DM");
+      if (denied) return denied;
+      const { deferred, ...rest } = args;
+      const answers = setupAnswers(rest);
+      if (typeof answers === "string") return fail(answers);
+      const fields = Object.keys(answers);
+      if (deferred !== true && fields.length === 0) return fail("record at least one answer, or deferred:true");
+      const store = openStore();
+      try {
+        if (getConfig(store)) return fail("setup is already saved; change it with aha_setup_save");
+        const now = new Date();
+        if (deferred === true) {
+          if (fields.length > 0) return fail("record answers or defer, not both");
+          return ok({ deferredUntil: deferSetup(store, now) });
+        }
+        recordAnswers(store, answers);
+        return ok({ recorded: fields, status: setupStatus(store, now) });
+      } finally {
+        store.close();
+      }
     },
   }));
 
