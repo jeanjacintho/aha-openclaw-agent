@@ -184,3 +184,15 @@ test("a skipped user turn in the owner's session is logged, other skips are not"
   assert.equal(gateLogs().length, 1);
   assert.equal(skipReason({ sessionKey: "agent:main:plow:group:cht_1", trigger: "user" }, false), undefined);
 });
+
+for (const mode of ["full", "discovery", "tool-discovery"]) test(`the setup gate hook is registered in ${mode} mode`, () => {
+  // Agent turns use the gateway's runtime registry, which loads the plugin in
+  // discovery mode; a hook that only full mode registers never runs live.
+  const hooks: string[] = [];
+  entry.register({
+    registrationMode: mode, runtime: {}, logger: { info() {} },
+    on(name: string) { hooks.push(name); },
+    registerChannel() {}, registerTool() {},
+  } as never);
+  assert.deepEqual(hooks, ["before_prompt_build"]);
+});
