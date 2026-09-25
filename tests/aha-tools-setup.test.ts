@@ -343,7 +343,8 @@ test("the interview records one answer at a time and aha_setup_save({}) saves th
   const step = (args: Record<string, unknown>) => map.get("aha_setup_step")!.execute("call", args);
   const first = await step({ company: "Plow", domain: "plow.co" });
   assert.deepEqual(first.details, { recorded: ["company", "domain"], status: "SETUP_NEEDED\nDRAFT:company,domain\nNEXT:aliases" });
-  await step({ aliases: ["Plow agents", " plow.co "], negatives: ["snow plow", ""] });
+  await step({ aliases: ["Plow agents", " plow.co "] });
+  await step({ negatives: ["snow plow", ""] });
   await step({ competitors: [] });
   await step({ sources: ["Hacker News", "agent index", "Product Hunt", "hn"], githubRepos: ["plow-pbc/plow-agents"] });
   await step({ tone: "direto e cordial", lang: "pt-BR" });
@@ -373,12 +374,13 @@ test("the interview records one answer at a time and aha_setup_save({}) saves th
 test("aha_setup_save args override recorded answers", async t => {
   const dir = await home(t);
   const map = tools(ownerDm);
-  await map.get("aha_setup_step")!.execute("call", { company: "Draft name", lang: "pt-BR" });
+  await map.get("aha_setup_step")!.execute("call", { company: "Draft name" });
+  await map.get("aha_setup_step")!.execute("call", { aliases: ["plow.co"] });
   await map.get("aha_setup_save")!.execute("call", { company: "Plow" });
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal(getConfig(store)?.company.name, "Plow");
-  assert.equal(getConfig(store)?.language, "pt-BR");
+  assert.deepEqual(getConfig(store)?.company.aliases, ["plow.co"]);
 });
 
 test("aha_setup_save without a company, passed or recorded, is refused", async t => {
@@ -453,4 +455,23 @@ test("the owner outside their DM is still refused", async t => {
     assert.equal(result.isError, true, JSON.stringify(ctx));
   }
   assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:none\nNEXT:company");
+});
+
+test("aha_setup_step refuses answers to questions the owner was not asked yet", async t => {
+  const dir = await home(t);
+  const step = tools(ownerDm).get("aha_setup_step")!;
+  await step.execute("call", { company: "Plow", domain: "plow.co" });
+  // Live, the model answered the aliases question and filled these with [] unasked.
+  for (const args of [{ competitors: [] }, { negatives: [] }, { aliases: [], negatives: [] }, { digestHour: 21 }]) {
+    const result = await step.execute("call", args);
+    assert.equal(result.isError, true, JSON.stringify(args));
+    assert.match(result.content[0].text, /NEXT is aliases/);
+  }
+  assert.equal(status(dir), "SETUP_NEEDED\nDRAFT:company,domain\nNEXT:aliases");
+  const aliases = await step.execute("call", { aliases: [] });
+  assert.match((aliases.details as { status: string }).status, /NEXT:negatives$/);
+  // Corrections to an earlier answer are still fine.
+  const fix = await step.execute("call", { company: "Plow PBC" });
+  assert.equal(fix.isError ?? false, false);
+  assert.match((fix.details as { status: string }).status, /NEXT:negatives$/);
 });

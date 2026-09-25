@@ -81,7 +81,13 @@ test("the prompt acts on every setup gate state", () => {
   for (const text of ["READY", "DEFERRED", "SETUP_NEEDED", "NEXT:", "aha_setup_step", "aha_setup_step({deferred:true})", "aha_setup_save({})", "aha_status"]) {
     assert.ok(prompt.includes(text), text);
   }
-  for (const next of ["`company`", "`aliases`", "`competitors`", "`sources`", "`voice`", "`digest`", "`close`"]) assert.ok(prompt.includes(next), next);
+  for (const next of ["`company`", "`aliases`", "`negatives`", "`competitors`", "`sources`", "`voice`", "`digest`", "`close`"]) assert.ok(prompt.includes(next), next);
   assert.match(prompt, /\["readlink", "\/etc\/localtime"\]/);
   assert.ok(prompt.length <= 20_000, "workspace instructions fit the per-file context cap");
+});
+
+test("the interview records only what the owner said", () => {
+  assert.match(prompt, /never fill a field with `\[\]` or a guess/);
+  assert.match(prompt, /não responder ainda/);
+  assert.match(prompt, /only ever posted after the owner\s+approves them/);
 });

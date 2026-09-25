@@ -17,16 +17,20 @@ export type SetupAnswers = {
   tz?: string;
 };
 
-export type SetupQuestion = "company" | "aliases" | "competitors" | "sources" | "voice" | "digest";
+export type SetupQuestion = "company" | "aliases" | "negatives" | "competitors" | "sources" | "voice" | "digest";
 export type SetupNext = SetupQuestion | "close";
 
 // One message per question, in this order; a question is answered once all of
 // its required fields are recorded (an empty list is an answer: "none").
-export const SETUP_QUESTIONS: { id: SetupQuestion; fields: (keyof SetupAnswers)[] }[] = [
-  { id: "company", fields: ["company"] },
-  { id: "aliases", fields: ["aliases", "negatives"] },
+// Optional fields belong to the question but do not hold it open.
+export const SETUP_QUESTIONS: { id: SetupQuestion; fields: (keyof SetupAnswers)[]; optional?: (keyof SetupAnswers)[] }[] = [
+  { id: "company", fields: ["company"], optional: ["domain"] },
+  // Asked apart: asked together, an owner answers one half and the model
+  // filled the other with an empty list nobody gave.
+  { id: "aliases", fields: ["aliases"] },
+  { id: "negatives", fields: ["negatives"] },
   { id: "competitors", fields: ["competitors"] },
-  { id: "sources", fields: ["sources"] },
+  { id: "sources", fields: ["sources"], optional: ["githubRepos"] },
   { id: "voice", fields: ["tone", "lang"] },
   { id: "digest", fields: ["digestHour", "tz"] },
 ];
@@ -67,6 +71,14 @@ export function clearDraft(store: Store) {
 
 export function answeredFields(answers: SetupAnswers): (keyof SetupAnswers)[] {
   return (Object.keys(answers) as (keyof SetupAnswers)[]).filter(key => answers[key] !== undefined);
+}
+
+// Fields an answer may record while NEXT is `next`: that question's own, plus
+// earlier ones so the owner can correct them. Later questions have not been
+// asked yet, so nothing may be recorded for them.
+export function recordableFields(next: SetupNext): (keyof SetupAnswers)[] {
+  const upTo = next === "close" ? SETUP_QUESTIONS.length : SETUP_QUESTIONS.findIndex(q => q.id === next) + 1;
+  return SETUP_QUESTIONS.slice(0, upTo).flatMap(q => [...q.fields, ...(q.optional ?? [])]);
 }
 
 export function nextQuestion(answers: SetupAnswers): SetupNext {

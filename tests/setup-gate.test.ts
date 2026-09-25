@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { clearDraft, deferSetup, getDraft, nextQuestion, recordAnswers, setupStatus, SETUP_DEFER_MS } from "../aha/setup/draft.ts";
+import { clearDraft, deferSetup, getDraft, nextQuestion, recordableFields, recordAnswers, setupStatus, SETUP_DEFER_MS } from "../aha/setup/draft.ts";
 import { openStore } from "../aha/store/db.ts";
 import entry from "../plugin/index.ts";
 import { gateContext, isOwnerDm, isOwnerDmTurn, OWNER_DM_SESSION, runGate, skipReason } from "../plugin/setup-gate.ts";
@@ -27,7 +27,7 @@ const NOW = new Date("2026-09-25T12:00:00.000Z");
 test("questions come in order and each is skipped once its fields are recorded", () => {
   assert.equal(nextQuestion({}), "company");
   assert.equal(nextQuestion({ company: "Plow" }), "aliases");
-  assert.equal(nextQuestion({ company: "Plow", aliases: ["plow.co"] }), "aliases");
+  assert.equal(nextQuestion({ company: "Plow", aliases: ["plow.co"] }), "negatives");
   assert.equal(nextQuestion({ company: "Plow", aliases: [], negatives: [] }), "competitors");
   assert.equal(nextQuestion({ company: "Plow", aliases: [], negatives: [], competitors: [] }), "sources");
   assert.equal(nextQuestion({ company: "Plow", aliases: [], negatives: [], competitors: [], sources: ["hn"] }), "voice");
@@ -195,4 +195,13 @@ for (const mode of ["full", "discovery", "tool-discovery"]) test(`the setup gate
     registerChannel() {}, registerTool() {},
   } as never);
   assert.deepEqual(hooks, ["before_prompt_build"]);
+});
+
+test("an answer may record its own question and earlier ones, never a later one", () => {
+  assert.deepEqual(recordableFields("company"), ["company", "domain"]);
+  assert.deepEqual(recordableFields("aliases"), ["company", "domain", "aliases"]);
+  assert.ok(!recordableFields("aliases").includes("negatives"));
+  assert.ok(recordableFields("sources").includes("githubRepos"));
+  assert.ok(!recordableFields("voice").includes("digestHour"));
+  assert.ok(recordableFields("close").includes("tz"));
 });
