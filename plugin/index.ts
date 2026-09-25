@@ -155,27 +155,35 @@ const plugin: ChannelPlugin<Account> = {
   },
 };
 
+// The owner's own phone DM starts from the Launch watch setup gate.
+function registerSetupGate(api: Parameters<NonNullable<Parameters<typeof defineChannelPluginEntry>[0]["registerCapabilities"]>>[0]) {
+  api.on("before_prompt_build", async (_event, ctx) => {
+    const turn = activeTurn.getStore();
+    const inDispatch = Boolean(turn && turn.accountId === "chat" && isOwnerDm(turn.chat));
+    if (!inDispatch && !isOwnerDmTurn(ctx)) {
+      const reason = skipReason(ctx, inDispatch);
+      if (reason) api.logger.info(reason);
+      return;
+    }
+    const output = runGate();
+    // One line per owner turn, so a live run shows what the gate injected.
+    api.logger.info(output ? `aha setup gate: ${output.split("\n").filter(line => !line.startsWith("UNTIL:")).join(" ")}` : "aha setup gate unavailable; prompt fallback applies");
+    return output ? { prependContext: gateContext(output) } : undefined;
+  });
+}
+
 export default defineChannelPluginEntry({
   id: "plow", name: "Plow", description: "Plow channel", plugin,
   setRuntime: value => { runtime = value; },
   registerFull(api) {
     if (api.registrationMode === "full") api.logger.info("plow channel registered");
-    // The owner's own phone DM starts from the Launch watch setup gate.
-    api.on("before_prompt_build", async (_event, ctx) => {
-      const turn = activeTurn.getStore();
-      const inDispatch = Boolean(turn && turn.accountId === "chat" && isOwnerDm(turn.chat));
-      if (!inDispatch && !isOwnerDmTurn(ctx)) {
-        const reason = skipReason(ctx, inDispatch);
-        if (reason) api.logger.info(reason);
-        return;
-      }
-      const output = runGate();
-      // One line per owner turn, so a live run shows what the gate injected.
-      api.logger.info(output ? `aha setup gate: ${output.split("\n").filter(line => !line.startsWith("UNTIL:")).join(" ")}` : "aha setup gate unavailable; prompt fallback applies");
-      return output ? { prependContext: gateContext(output) } : undefined;
-    });
   },
   registerCapabilities(api) {
+    // Not in registerFull: agent turns read hooks from the gateway's runtime
+    // registry, which loads this plugin in discovery mode, where OpenClaw
+    // calls registerCapabilities but never registerFull. A hook registered
+    // only in registerFull is dropped silently there.
+    registerSetupGate(api);
     api.registerTool(context => ({
       name: "plow_start_thread", label: "Start a Plow group thread",
       description: "Start a group text on your own Plow line with the owner and the supplied phone numbers. Sends the first message and returns the chat uid; use message with action send, channel plow, accountId chat and that uid as target for follow-ups. Accepts phone numbers, not chat ids or email addresses.",
