@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { passesFilter1, runIngest } from "../aha/pipeline/ingest.ts";
+import { mentionsTerm, passesFilter1, runIngest } from "../aha/pipeline/ingest.ts";
 import { agentIndexSource } from "../aha/sources/agent-index.ts";
 import { hnSource } from "../aha/sources/hn.ts";
 import { openStore } from "../aha/store/db.ts";
@@ -135,4 +135,29 @@ test("Agent Index without a token is skipped and ingest continues", async t => {
   const report = await runIngest(store, [off, on], now);
   assert.equal(called, 0);
   assert.deepEqual(report.sources.map(row => row.id), ["hn"]);
+});
+
+test("a company name counts only as a whole word", () => {
+  // Taken from the live Willow backfill, where substring matching let all of these in.
+  for (const text of ["swords into plowshares", "those costs get plowed back into AI", "Project Plowshare says hello", "a snowplow went by", "https://en.wikipedia.org/wiki/Project_Plowshare", "plows, pickaxes"]) {
+    assert.equal(mentionsTerm(text, "plow"), false, text);
+  }
+  for (const text of ["I built this on Plow.", "plow's latch is neat", "PLOW agents", "(plow)", "see plow.co/docs", "Plow—the agent platform"]) {
+    assert.equal(mentionsTerm(text, "plow"), true, text);
+  }
+  assert.equal(mentionsTerm("see plow.co/docs", "plow.co"), true);
+  assert.equal(mentionsTerm("visit plow.com today", "plow.co"), false);
+  assert.equal(mentionsTerm("Plow PBC raised", "Plow PBC"), true);
+  assert.equal(mentionsTerm("c++ and plow", "c++"), true);
+  assert.equal(mentionsTerm("anything", "  "), false);
+});
+
+test("filtro 1 drops the backfill noise that only contained the name inside another word", () => {
+  const plow = { company: { name: "Plow", domain: "plow.co", aliases: [], negative: [] } };
+  const item = (body: string) => ({ source: "hn", externalId: body, url: null, author: "a", body, publishedAt: now.toISOString() });
+  assert.equal(passesFilter1(item("Those headcount costs are going to get plowed back into AI tokens."), plow), false);
+  assert.equal(passesFilter1(item("Project Plowshare says hello"), plow), false);
+  assert.equal(passesFilter1(item("I integrated email and calendar through Plow."), plow), true);
+  // Negatives are still substring exclusions the owner chose.
+  assert.equal(passesFilter1(item("Plow is not the snowplowing company"), { company: { ...plow.company, negative: ["snowplow"] } }), false);
 });
