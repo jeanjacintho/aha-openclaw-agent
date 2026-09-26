@@ -61,7 +61,7 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
     child.on("close", code => resolve(code ?? 1));
   });
   const python = (args: string[], token?: string) => run("python3", [CLIENT, ...args], {
-    PATH: process.env.PATH!, HOME: "/var/lib/plow", AGENT_ID: agent, PLOW_API_BASE: process.env.PLOW_API_BASE!, ...(token ? { PLOW_AGENT_TOKEN: token } : {}),
+    PATH: process.env.PATH!, HOME: "/var/lib/plow", AGENT_ID: agent, PLOW_API_BASE: process.env.PLOW_API_BASE!, OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR!, ...(token ? { PLOW_AGENT_TOKEN: token } : {}),
   });
   const pass = async () => {
     const root = `${state}/.openclaw/agents`;
