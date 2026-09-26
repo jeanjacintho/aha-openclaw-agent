@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 
-export async function startGateway(captureOutput = false, mcpUrl?: string) {
+export async function startGateway(captureOutput = false, mcpUrl?: string, writeLog?: (chunk: Buffer) => void) {
   const children = new Set<ChildProcess>();
   let stopping = false;
   let restartTimer: NodeJS.Timeout | undefined;
@@ -17,6 +17,10 @@ export async function startGateway(captureOutput = false, mcpUrl?: string) {
   const launch = (label: string, args: string[], options: SpawnOptions) => {
     const child = spawn(process.execPath, args, options);
     children.add(child);
+    if (!captureOutput) {
+      child.stdout?.on("data", (chunk: Buffer) => { process.stdout.write(chunk); writeLog?.(chunk); });
+      child.stderr?.on("data", (chunk: Buffer) => { process.stderr.write(chunk); writeLog?.(chunk); });
+    }
     child.on("error", error => { console.error(error); if (label === "gateway") { process.exitCode = 1; stop(); } });
     child.on("close", (code, signal) => {
       children.delete(child);
@@ -39,7 +43,7 @@ export async function startGateway(captureOutput = false, mcpUrl?: string) {
     return child;
   };
   const startBridge = () => launch("bridge", ["/opt/plow/boot/mcp-bridge.js"], {
-    stdio: ["ignore", "inherit", "inherit", "ipc"],
+    stdio: captureOutput ? ["ignore", "inherit", "inherit", "ipc"] : ["ignore", "pipe", "pipe", "ipc"],
     env: { PLOW_MCP_URL: mcpUrl!, PLOW_AGENT_TOKEN: process.env.PLOW_AGENT_TOKEN, PLOW_MCP_BRIDGE_TOKEN: process.env.PLOW_MCP_BRIDGE_TOKEN },
   });
   if (mcpUrl) {
@@ -48,6 +52,6 @@ export async function startGateway(captureOutput = false, mcpUrl?: string) {
     if (stopping) return bridge;
   }
   return launch("gateway", ["/app/openclaw.mjs", "gateway"], {
-    stdio: captureOutput ? ["ignore", "pipe", "pipe"] : "inherit", env: process.env,
+    stdio: ["ignore", "pipe", "pipe"], env: process.env,
   });
 }

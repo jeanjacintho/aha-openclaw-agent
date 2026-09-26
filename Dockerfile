@@ -1,9 +1,11 @@
-FROM ghcr.io/openclaw/openclaw:2026.9.4@sha256:cc596b846506a5f4cfcee111394a2725f375f01cca2ebb492a161fd1b747f101
+FROM ghcr.io/openclaw/openclaw:2026.9.6@sha256:0a5ff5e682e62afa19149df126aa50063bf65ef885b5c94713ce32dc0eb12e15
 ARG PLOW_REVISION
 LABEL org.opencontainers.image.revision=$PLOW_REVISION co.plow.probe=/opt/plow/probe
 USER root
-RUN mkdir -p /opt/plow/skills /var/lib/plow && chown node:node /var/lib/plow
+RUN mkdir -p /opt/plow/skills /var/lib/plow /etc/plow/openclaw && chown node:node /var/lib/plow /etc/plow/openclaw
 COPY boot /opt/plow/boot
+COPY boot/gateway-password.sh /etc/profile.d/plow-openclaw.sh
+RUN printf '\n. /etc/profile.d/plow-openclaw.sh\n' >> /home/node/.bashrc
 COPY aha /opt/plow/aha
 COPY plugin /opt/plow/plugin
 COPY prompt /opt/plow/prompt
@@ -50,11 +52,14 @@ RUN case "${TARGETARCH:-amd64}" in \
  && rm /tmp/agentsview.tgz \
  && chmod 0755 /usr/local/bin/agentsview
 RUN cd /opt/plow && npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts && node /opt/plow/build.ts && chmod +x /opt/plow/probe
-ENV OPENCLAW_STATE_DIR=/var/lib/plow OPENCLAW_CONFIG_PATH=/var/lib/plow/openclaw.json OPENCLAW_NO_RESPAWN=1 NODE_DISABLE_COMPILE_CACHE=1
+ENV OPENCLAW_STATE_DIR=/var/lib/plow OPENCLAW_CONFIG_PATH=/var/lib/plow/openclaw.json OPENCLAW_INCLUDE_ROOTS=/etc/plow/openclaw OPENCLAW_NO_RESPAWN=1 NODE_DISABLE_COMPILE_CACHE=1
 # Agent Index listing. Compose (and a host that injects env) can override without rebuild.
+# AGENT_RUNTIME is what the page says the agent runs on; without it the page
+# falls back to its Hermes placeholder.
 ENV AGENT_ID=aha \
     AGENT_NAME=AHA \
-    AGENT_BLURB="Watches public mentions of your company. Hacker News and Agent Index comments, then a daily digest on Plow."
+    AGENT_BLURB="Watches public mentions of your company. Hacker News and Agent Index comments, then a daily digest on Plow." \
+    AGENT_RUNTIME=OpenClaw
 # The inherited healthcheck loads config and can race the boot state lock.
 HEALTHCHECK NONE
 USER node

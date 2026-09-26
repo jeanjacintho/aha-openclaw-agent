@@ -43,10 +43,14 @@ export function keepAgentsviewDaemon(state = "/var/lib/plow") {
 // No switch. The reporter is here because this image carries it; an owner who
 // does not want their usage on the Index builds without AGENT_ID, and then
 // there is nothing to report for and this stands down.
-export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
+export function startAgentIndex(interval = 300_000, state = "/var/lib/plow", writeLog?: (chunk: Buffer) => void) {
   const agent = process.env.AGENT_ID;
   if (!agent) return undefined;
   keepAgentsviewDaemon(state);
+  const logStderr = (child: ReturnType<typeof spawn>) => child.stderr?.on("data", (chunk: Buffer) => {
+    process.stderr.write(chunk);
+    writeLog?.(chunk);
+  });
   // The Plow bearer is passed to the register pass only, the same split the
   // client documents: registration exchanges it once for an Index key, and
   // every report after that uses the key the client stored.
@@ -56,7 +60,8 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
   // install that loses them on recreate re-registers as a new install and
   // strands the usage already published.
   const run = (command: string, args: string[], env: Record<string, string>) => new Promise<number>(resolve => {
-    const child = spawn(command, args, { stdio: ["ignore", "ignore", "inherit"], env });
+    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"], env });
+    logStderr(child);
     child.on("error", error => { console.error(`agent-index: ${error.message}`); resolve(1); });
     child.on("close", code => resolve(code ?? 1));
   });
@@ -82,7 +87,7 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow") {
       // Sent only when set. The Index leaves a field it is not given alone, so
       // an empty name would not clear the name, and one passed every pass would
       // overwrite an edit the owner made on their page.
-      for (const [flag, value] of [["--name", process.env.AGENT_NAME], ["--blurb", process.env.AGENT_BLURB]] as const) if (value) register.push(flag, value);
+      for (const [flag, value] of [["--name", process.env.AGENT_NAME], ["--blurb", process.env.AGENT_BLURB], ["--runtime", process.env.AGENT_RUNTIME]] as const) if (value) register.push(flag, value);
       if (await python(register, process.env.PLOW_AGENT_TOKEN)) return console.error("agent-index: no index key this pass, not reporting");
     }
     if (await python(["--agent", agent])) console.error("agent-index: reporter exited non-zero, see the line above");

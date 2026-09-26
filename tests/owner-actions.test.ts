@@ -59,7 +59,7 @@ for (const action of ["pending", "thread-cache", "thread-roster", "owner-send"])
   entry.register({ registrationMode: "full", on() {}, logger: { info() {} },
     registerChannel(value: { plugin: typeof channel }) { channel = value.plugin; },
     registerTool(factory: (context: object) => typeof tool & { name?: string }) {
-      const candidate = factory({ config: cfg });
+      const candidate = factory({ config: cfg, sessionKey: "group" });
       if (candidate.name === "plow_start_thread") tool = candidate;
     },
     runtime: { channel: { routing: { resolveAgentRoute: () => ({ sessionKey: "group" }) }, inbound: {

@@ -48,14 +48,14 @@ test("no AGENT_ID reports for nobody, so nothing runs", async t => {
 });
 
 test("an unregistered install registers, then reports", async t => {
-  env(t, { AGENT_ID: "my-agent", AGENT_NAME: "My Agent", AGENT_BLURB: "What it does", PLOW_API_BASE: "https://api.example", PLOW_AGENT_TOKEN: "token", OPENCLAW_STATE_DIR: "/var/lib/plow" });
+  env(t, { AGENT_ID: "my-agent", AGENT_NAME: "My Agent", AGENT_BLURB: "What it does", AGENT_RUNTIME: "OpenClaw", PLOW_API_BASE: "https://api.example", PLOW_AGENT_TOKEN: "token", OPENCLAW_STATE_DIR: "/var/lib/plow" });
   const calls = fakeClient(t, [0, 3, 0, 0]);
   startAgentIndex(300_000, await stateDir(t))?.close?.();
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(argv(calls), [
     ["agentsview", "sync"],
     ["status"],
-    ["--register", "--agent", "my-agent", "--name", "My Agent", "--blurb", "What it does"],
+    ["--register", "--agent", "my-agent", "--name", "My Agent", "--blurb", "What it does", "--runtime", "OpenClaw"],
     ["--agent", "my-agent"],
   ]);
   assert.equal(calls[0].env.PLOW_AGENT_TOKEN, undefined);
@@ -73,7 +73,7 @@ test("an unregistered install registers, then reports", async t => {
 });
 
 test("a registered install only reports", async t => {
-  env(t, { AGENT_ID: "my-agent", AGENT_NAME: undefined, AGENT_BLURB: undefined, PLOW_API_BASE: "https://api.example" });
+  env(t, { AGENT_ID: "my-agent", AGENT_NAME: undefined, AGENT_BLURB: undefined, AGENT_RUNTIME: undefined, PLOW_API_BASE: "https://api.example" });
   const calls = fakeClient(t, [0, 0, 0]);
   startAgentIndex(300_000, await stateDir(t))?.close?.();
   await new Promise(resolve => setTimeout(resolve, 10));

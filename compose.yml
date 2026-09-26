@@ -14,8 +14,19 @@ services:
       AGENT_ID: ${AGENT_ID-aha}
       AGENT_NAME: ${AGENT_NAME:-AHA}
       AGENT_BLURB: ${AGENT_BLURB:-Watches public mentions of your company. Hacker News and Agent Index comments, then a daily digest on Plow.}
+    ports:
+      - "127.0.0.1:3001:3001"
     volumes:
       - state:/var/lib/plow
     stop_grace_period: 35s
+  # Local only. This plays Plow's agent-web proxy, which sits in front of your
+  # image in the cloud, so localhost:3001 behaves like the production dashboard.
+  # Anyone who can reach localhost:3001 on this machine is admin.
+  dev-dashboard:
+    image: caddy:2@sha256:14a9c00d4e833ebc2b65d36515b37bde3b73f0b323a2663aaafc88953d8c4e3f
+    network_mode: service:agent
+    depends_on: [agent]
+    volumes:
+      - ./dev/Caddyfile:/etc/caddy/Caddyfile:ro
 volumes:
   state:

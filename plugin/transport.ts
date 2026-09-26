@@ -92,6 +92,20 @@ export async function recover(account: Account, chat: string, checkpoint: string
   }
 }
 
+async function earliestUnansweredOwnerMessage(account: Account, chat: string, newest: Message): Promise<string> {
+  let earliest = newest.uid;
+  let cursor = newest.uid;
+  for (;;) {
+    const page = await request<Page<Message>>(account, `/chats/${chat}/messages?limit=50&starting_after=${cursor}`);
+    for (const message of page.data) {
+      if (message.direction !== "inbound" || message.sender.type !== "member") return earliest;
+      earliest = message.uid;
+    }
+    if (!page.has_more || !page.data.length) return earliest;
+    cursor = page.data.at(-1)!.uid;
+  }
+}
+
 export async function listen(account: Account, signal: AbortSignal, log: (text: string) => void, turn: (chat: Chat, message: Message, firstContact: boolean, history: Message[]) => Promise<TurnOutcome>) {
   const root = process.env.OPENCLAW_STATE_DIR;
   if (!root) throw new Error("OPENCLAW_STATE_DIR is required");
@@ -175,11 +189,11 @@ export async function listen(account: Account, signal: AbortSignal, log: (text: 
     const enqueue = (chat: string, work: () => Promise<void>) => {
       const previous = queues.get(chat) ?? Promise.resolve();
       const next = previous.then(async () => {
-        if ((!accepting && account.accountId === "chat") || signal.aborted || queueFailed) return;
+        if (!accepting || signal.aborted || queueFailed) return;
         if (active === 4) await new Promise<void>(resolve => slots.push(resolve));
         else active++;
         try {
-          if ((accepting || account.accountId === "email") && !signal.aborted && !queueFailed) await work();
+          if (accepting && !signal.aborted && !queueFailed) await work();
         } catch (error) {
           queueFailed = true;
           queueError = error;
@@ -238,22 +252,15 @@ export async function listen(account: Account, signal: AbortSignal, log: (text: 
           try { checkpoint = await readFile(`${dir}/${encodeURIComponent(chat.uid)}`, "utf8"); }
           catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            const bufferedBeforeRead = bufferedChats.get(chat.uid)?.values().next().value;
             const page = await request<Page<Message>>(account, `/chats/${chat.uid}/messages?limit=1`);
             const newest = page.data[0];
             checkpoint = chat.uid === owner?.uid && newest?.direction === "inbound" && newest.sender.type === "member"
-              ? `first:${newest.uid}` : newest?.uid ?? "";
+              ? `first:${await earliestUnansweredOwnerMessage(account, chat.uid, newest)}` : newest?.uid ?? "";
             const buffered = bufferedChats.get(chat.uid);
-            // HTTP history can include a newer message whose socket frame is delayed.
-            // Compare history order when buffer membership cannot order the candidates.
-            let first = bufferedBeforeRead ?? (!checkpoint.startsWith("first:") || buffered?.has(newest.uid)
-              ? buffered?.values().next().value : undefined);
-            const candidate = buffered?.values().next().value;
-            if (!first && candidate && checkpoint.startsWith("first:") &&
-              (await recover(account, chat.uid, `first:${candidate}`)).some(message => message.uid === newest.uid)) {
-              first = candidate;
-            }
-            if (first) checkpoint = `first:${first}`;
+            const first = buffered?.values().next().value;
+            // A buffered frame moves first contact back only when history proves it is older.
+            if (first && (!checkpoint.startsWith("first:") || (first !== checkpoint.slice(6) &&
+              (await recover(account, chat.uid, `first:${first}`)).some(message => message.uid === checkpoint.slice(6))))) checkpoint = `first:${first}`;
             await ack(chat.uid, checkpoint);
             // Late frames can include an exclusive baseline, but must not replace pending first contact.
             if (!checkpoint.startsWith("first:") && bufferedChats.has(chat.uid)) {
@@ -297,17 +304,17 @@ export async function listen(account: Account, signal: AbortSignal, log: (text: 
           if (account.accountId === "chat" && !recoveredChats.has(event.chat_id)) {
             await replay(event.chat_id);
           }
-          if ((!accepting && account.accountId === "chat") || signal.aborted) return;
+          if (!accepting || signal.aborted) return;
           if (!replayed.has(event.data.message.uid)) await consume(event.chat_id, event.data.message);
           remember(event.event_id);
         });
       }
-      accepting = false;
+      accepting = account.accountId === "email";
       await Promise.all(queues.values());
       if (queueFailed) throw queueError;
       if (unauthorized) throw new HttpError(401);
     } catch (error) {
-      accepting = false;
+      accepting = account.accountId === "email";
       if (signal.aborted) break;
       if (error instanceof AmbiguousOwnerChatError || (error instanceof HttpError && error.status === 401)) {
         log(error.message + "; stopped until restart");
