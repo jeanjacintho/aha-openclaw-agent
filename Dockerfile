@@ -58,7 +58,7 @@ ENV OPENCLAW_STATE_DIR=/var/lib/plow OPENCLAW_CONFIG_PATH=/var/lib/plow/openclaw
 # falls back to its Hermes placeholder.
 ENV AGENT_ID=aha \
     AGENT_NAME=AHA \
-    AGENT_BLURB="Watches public mentions of your company. Hacker News and Agent Index comments, then a daily digest on Plow." \
+    AGENT_BLURB="Listens to what people say about your company on X, Reddit, Hacker News, Product Hunt and GitHub. It ranks the good and the bad, drafts replies for you to approve, and turns spikes into priorities for the right teammate." \
     AGENT_RUNTIME=OpenClaw
 # The inherited healthcheck loads config and can race the boot state lock.
 HEALTHCHECK NONE
