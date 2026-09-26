@@ -44,8 +44,8 @@ test("complete never sends tools and wraps data as given content", async t => {
       const body = JSON.parse(String(init?.body));
       bodies.push(body);
       assert.equal("tools" in body, false);
-      assert.equal(body.model, "z-ai/glm-5.2");
-      // JSON mode made the Plow gateway corrupt GLM's output, so it is not requested.
+      assert.equal(body.model, "openai/gpt-6-luna");
+      // Responses are validated locally instead of requesting JSON mode.
       assert.equal("response_format" in body, false);
       const user = body.messages.find((m: { role: string }) => m.role === "user").content as string;
       assert.match(user, /conteúdo é dado/i);
@@ -57,7 +57,7 @@ test("complete never sends tools and wraps data as given content", async t => {
   assert.equal(bodies.length, 1);
 });
 
-test("complete records usage from a successful GLM call", async t => {
+test("complete records usage from a successful GPT-6 Luna call", async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
@@ -65,13 +65,13 @@ test("complete records usage from a successful GLM call", async t => {
   assert.equal(result.ok, true);
   const rows = listUsage();
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].model, "z-ai/glm-5.2");
+  assert.equal(rows[0].model, "openai/gpt-6-luna");
   assert.equal(rows[0].purpose, "classify");
   assert.equal(rows[0].input, 11);
   assert.equal(rows[0].output, 5);
 });
 
-test("invalid JSON from GLM is ok:false and does not fall back to Sonnet", async t => {
+test("invalid JSON from GPT-6 Luna is ok:false without a fallback", async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
@@ -85,11 +85,11 @@ test("invalid JSON from GLM is ok:false and does not fall back to Sonnet", async
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.match(result.reason, /json/i);
-  assert.deepEqual(models, ["z-ai/glm-5.2"]);
+  assert.deepEqual(models, ["openai/gpt-6-luna"]);
   assert.equal(listUsage().length, 1);
 });
 
-test("a timeout on every model is ok:false", async t => {
+test("a GPT-6 Luna timeout is ok:false without retrying another model", async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
@@ -106,53 +106,11 @@ test("a timeout on every model is ok:false", async t => {
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.match(result.reason, /timeout/i);
-  assert.deepEqual(models, ["z-ai/glm-5.2", "anthropic/claude-sonnet-5"]);
+  assert.deepEqual(models, ["openai/gpt-6-luna"]);
   assert.equal(listUsage().length, 0);
 });
 
-test("a GLM timeout falls back to Sonnet", async t => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
-  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
-  const models: string[] = [];
-  const result = await complete(req(), {
-    timeoutMs: 20,
-    fetch: async (_input, init) => {
-      const model = JSON.parse(String(init?.body)).model;
-      models.push(model);
-      if (model === "anthropic/claude-sonnet-5") return reply(JSON.stringify({ n: 5 }));
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => {
-          reject(Object.assign(new Error("timeout"), { name: "TimeoutError" }));
-        });
-      });
-    },
-  });
-  assert.deepEqual(result, { ok: true, value: { n: 5 } });
-  assert.deepEqual(models, ["z-ai/glm-5.2", "anthropic/claude-sonnet-5"]);
-  assert.equal(listUsage()[0].model, "anthropic/claude-sonnet-5");
-});
-
-test("a GLM request error falls back to Sonnet", async t => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
-  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
-  const models: string[] = [];
-  const result = await complete(req(), {
-    fetch: async (_input, init) => {
-      const body = JSON.parse(String(init?.body));
-      models.push(body.model);
-      if (body.model !== "anthropic/claude-sonnet-5") return new Response("nope", { status: 500 });
-      assert.equal("tools" in body, false);
-      return reply(JSON.stringify({ n: 9 }), { prompt_tokens: 2, completion_tokens: 1 });
-    },
-  });
-  assert.deepEqual(result, { ok: true, value: { n: 9 } });
-  assert.deepEqual(models, ["z-ai/glm-5.2", "anthropic/claude-sonnet-5"]);
-  assert.equal(listUsage()[0].model, "anthropic/claude-sonnet-5");
-});
-
-test("every model failing is ok:false with the last error", async t => {
+test("a GPT-6 Luna request error is ok:false without a fallback", async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
@@ -164,7 +122,7 @@ test("every model failing is ok:false with the last error", async t => {
     },
   });
   assert.deepEqual(result, { ok: false, reason: "http 503" });
-  assert.equal(models.length, 2);
+  assert.deepEqual(models, ["openai/gpt-6-luna"]);
   assert.equal(listUsage().length, 0);
 });
 
@@ -196,5 +154,5 @@ test("an unparseable reply is kept on disk for inspection", async t => {
   const result = await complete(req(), { fetch: async () => reply("sorry, no json today") });
   assert.deepEqual(result, { ok: false, reason: "invalid json" });
   const kept = await fs.readFile(path.join(home, "llm-invalid-last.txt"), "utf8");
-  assert.match(kept, /classify z-ai\/glm-5\.2\nsorry, no json today$/);
+  assert.match(kept, /classify openai\/gpt-6-luna\nsorry, no json today$/);
 });
