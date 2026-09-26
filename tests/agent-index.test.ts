@@ -48,7 +48,7 @@ test("no AGENT_ID reports for nobody, so nothing runs", async t => {
 });
 
 test("an unregistered install registers, then reports", async t => {
-  env(t, { AGENT_ID: "my-agent", AGENT_NAME: "My Agent", AGENT_BLURB: "What it does", PLOW_API_BASE: "https://api.example", PLOW_AGENT_TOKEN: "token" });
+  env(t, { AGENT_ID: "my-agent", AGENT_NAME: "My Agent", AGENT_BLURB: "What it does", PLOW_API_BASE: "https://api.example", PLOW_AGENT_TOKEN: "token", OPENCLAW_STATE_DIR: "/var/lib/plow" });
   const calls = fakeClient(t, [0, 3, 0, 0]);
   startAgentIndex(300_000, await stateDir(t))?.close?.();
   await new Promise(resolve => setTimeout(resolve, 10));
@@ -69,6 +69,7 @@ test("an unregistered install registers, then reports", async t => {
   // Named, never the client's compiled-in api.plow.co: a cloud agent's token is
   // a placeholder its proxy swaps, and sent past the proxy it is refused.
   assert.deepEqual(calls.slice(1).map(call => call.env.PLOW_API_BASE), ["https://api.example", "https://api.example", "https://api.example"]);
+  assert.deepEqual(calls.slice(1).map(call => call.env.OPENCLAW_STATE_DIR), ["/var/lib/plow", "/var/lib/plow", "/var/lib/plow"]);
 });
 
 test("a registered install only reports", async t => {
