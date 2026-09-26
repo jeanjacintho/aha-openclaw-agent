@@ -1,0 +1,21 @@
+# LOCAL DEV ONLY: anyone who can reach localhost:3001 is admin of this agent.
+:3001 {
+	@foreign_origin {
+		header Origin *
+		not {
+			header Origin http://localhost:3001
+			header Origin http://127.0.0.1:3001
+		}
+	}
+	respond @foreign_origin 403
+
+	request_header -X-Plow-*
+	request_header -X-Forwarded-*
+	request_header -Forwarded
+	request_header -X-Real-IP
+
+	reverse_proxy 127.0.0.1:3000 {
+		header_up Host 127.0.0.1:3000
+		header_up X-Plow-User dev-owner
+	}
+}

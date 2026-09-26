@@ -4,7 +4,7 @@ AHA watches what the public says about a company (and later its competitors),
 then texts the owner a daily digest on a Plow phone line. Milestone 1 listens
 to **Hacker News** (no key) and **Agent Index comments** (GitHub token required).
 
-It runs on the Plow OpenClaw base (`2026.9.4`). You talk to it by texting the
+It runs on the Plow OpenClaw base (`2026.9.6`). You talk to it by texting the
 line. The first owner message starts the conversation; there is no greeting
 before that.
 

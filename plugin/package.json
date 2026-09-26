@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "peerDependencies": {
-    "openclaw": "2026.9.4"
+    "openclaw": "2026.9.6"
   },
   "openclaw": {
     "extensions": [
