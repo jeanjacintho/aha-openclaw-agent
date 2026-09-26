@@ -20,14 +20,12 @@ export function renderConfig(identity: Identity, apiBase: string) {
       baseUrl: `${apiBase}/v1`, apiKey: "${PLOW_AGENT_TOKEN}", api: "openai-completions", authHeader: true,
       request: { allowPrivateNetwork: true },
       models: [
-        { id: "moonshotai/kimi-k2.5", name: "Kimi K2.5", input: ["text"], contextWindow: 262144, cost: { input: 0.57, output: 2.85 } },
-        { id: "z-ai/glm-5.2", name: "GLM 5.2", input: ["text"], contextWindow: 1048576, cost: { input: 0.5544, output: 1.7424 } },
-        { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", input: ["text", "image"], contextWindow: 1000000, cost: { input: 2.00, output: 10.00 } },
+        { id: "openai/gpt-6-luna", name: "GPT-6 Luna", input: ["text", "image"], contextWindow: 1050000, cost: { input: 0.10, output: 0.50 } },
       ],
     } } },
     agents: { entries: { main: { identity: { name } } }, defaults: {
       workspace: "/var/lib/plow/workspace", skipBootstrap: true,
-      model: { primary: "plow/moonshotai/kimi-k2.5", fallbacks: ["plow/z-ai/glm-5.2", "plow/anthropic/claude-sonnet-5"] }, sandbox: { mode: "off" },
+      model: { primary: "plow/openai/gpt-6-luna", fallbacks: [] }, sandbox: { mode: "off" },
     } },
     ...(identity.mcp_url ? { mcp: { sessionIdleTtlMs: 300_000, servers: { plow: {
       url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",

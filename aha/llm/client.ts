@@ -4,9 +4,8 @@ import { recordUsage } from "../usage/ledger.ts";
 import { wrapPublicPosts } from "./prompts.ts";
 import { type Schema } from "./schemas.ts";
 
-// Batch classify stays on GLM: on the Plow gateway, Kimi K2.5 reasons for
-// 1500+ tokens even on one post and hits the gateway's 60s 504 on a batch of 20.
-const MODELS = ["z-ai/glm-5.2", "anthropic/claude-sonnet-5"];
+// Classify and drafts use the same single model as the conversational agent.
+const MODELS = ["openai/gpt-6-luna"];
 // Per model call, just under the gateway's own 60s cutoff.
 const DEFAULT_TIMEOUT_MS = 55_000;
 
@@ -143,7 +142,7 @@ export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = 
         payload = await callModel(candidate, req, deps);
         break;
       } catch (error) {
-        // Timeouts fall through too: a stuck primary must not take the fallback down with it.
+        // Try the next configured model after a call failure or timeout, if there is one.
         if (i === MODELS.length - 1) throw error;
       }
     }
