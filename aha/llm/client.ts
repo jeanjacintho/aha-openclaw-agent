@@ -1,11 +1,16 @@
 import { writeFileSync } from "node:fs";
 import { ahaHome } from "../home.ts";
+import { WORKER_AGENT } from "../../boot/llm.ts";
 import { recordUsage } from "../usage/ledger.ts";
 import { wrapPublicPosts } from "./prompts.ts";
 import { type Schema } from "./schemas.ts";
 
-// Classify and drafts use the same single model as the conversational agent.
-const MODELS = ["openai/gpt-6-luna"];
+// Classify and drafts use the same single model as the conversational agent:
+// Plow's Luna, called directly, or, when boot moved inference off Plow and set
+// AHA_LLM_GATEWAY, the gateway's tool-less worker agent, which carries the
+// chosen model and Plow's fallback.
+const PLOW_MODELS = ["openai/gpt-6-luna"];
+export const GATEWAY_TARGET = `openclaw/${WORKER_AGENT}`;
 // Per model call, just under the gateway's own 60s cutoff.
 const DEFAULT_TIMEOUT_MS = 55_000;
 
@@ -28,14 +33,20 @@ type ChatResponse = {
   usage?: { prompt_tokens?: number; completion_tokens?: number; input?: number; output?: number };
 };
 
+function models() {
+  return process.env.AHA_LLM_GATEWAY ? [GATEWAY_TARGET] : PLOW_MODELS;
+}
+
 function apiBase() {
+  if (process.env.AHA_LLM_GATEWAY) return process.env.AHA_LLM_GATEWAY;
   const base = process.env.PLOW_API_BASE?.replace(/\/$/, "");
   if (!base) throw new Error("PLOW_API_BASE is required");
   return `${base}/v1/chat/completions`;
 }
 
 function headers() {
-  const token = process.env.PLOW_AGENT_TOKEN;
+  // The gateway takes its per-boot password from loopback callers like this one.
+  const token = process.env.AHA_LLM_GATEWAY ? process.env.OPENCLAW_GATEWAY_PASSWORD : process.env.PLOW_AGENT_TOKEN;
   return {
     "content-type": "application/json",
     ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -134,16 +145,17 @@ function record(model: string, purpose: string, payload: ChatResponse) {
 
 export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = {}): Promise<CompleteResult<T>> {
   let payload: ChatResponse | undefined;
-  let model = MODELS[0];
+  const candidates = models();
+  let model = candidates[0];
   try {
-    for (const [i, candidate] of MODELS.entries()) {
+    for (const [i, candidate] of candidates.entries()) {
       model = candidate;
       try {
         payload = await callModel(candidate, req, deps);
         break;
       } catch (error) {
         // Try the next configured model after a call failure or timeout, if there is one.
-        if (i === MODELS.length - 1) throw error;
+        if (i === candidates.length - 1) throw error;
       }
     }
   } catch (error) {

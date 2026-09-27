@@ -25,7 +25,9 @@ function message(row: { id: string; at: string; model: string; input: number; ou
 /** Worker calls, as one OpenClaw session the same collector already reads. */
 export function exportLedger(outRoot: string): { added: number } {
   prepareOutputRoot(outRoot);
-  const records = listUsage().filter(row => row.id);
+  // A call through the gateway (openclaw/<agent>) is already an OpenClaw
+  // session the reporter reads; exporting it too would count it twice.
+  const records = listUsage().filter(row => row.id && !row.model.startsWith("openclaw/"));
   mkdirSync(`${outRoot}/aha-worker/sessions`, { recursive: true });
   const dest = `${outRoot}/${FILE}`;
   return writeSession(dest, records.map(message), records[0] ? JSON.stringify({ type: "session", version: 4, id: SESSION, timestamp: records[0].at }) : undefined);
