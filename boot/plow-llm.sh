@@ -14,12 +14,23 @@ primary() {
   node --input-type=module -e 'import { llmRoute } from "/opt/plow/boot/llm.js"; console.log(llmRoute().route.primary);'
 }
 
+# True when the signed-in account's own catalog offers gpt-6-luna. --refresh
+# asks the account: the cached catalog never lists subscription models.
+offers_luna() {
+  "${openclaw[@]}" models list --provider openai --refresh 2>/dev/null \
+    | awk '$1 == "openai/gpt-6-luna" && $5 == "yes" { found = 1 } END { exit !found }'
+}
+
 case "${1:-status}" in
   openai)
-    "${openclaw[@]}" models auth login --provider openai --device-code
-    if ! "${openclaw[@]}" models list --provider openai | grep -q 'gpt-6-luna'; then
-      echo "plow-llm: this OpenAI account does not offer gpt-6-luna; staying on Plow" >&2
-      exit 1
+    if offers_luna; then
+      echo "plow-llm: already signed in, and the account offers gpt-6-luna"
+    else
+      "${openclaw[@]}" models auth login --provider openai --device-code
+      if ! offers_luna; then
+        echo "plow-llm: this OpenAI account does not offer gpt-6-luna; staying on Plow" >&2
+        exit 1
+      fi
     fi
     printf 'openai\n' > "$marker"
     ;;
