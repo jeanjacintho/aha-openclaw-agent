@@ -5,6 +5,7 @@ USER root
 RUN mkdir -p /opt/plow/skills /var/lib/plow /etc/plow/openclaw && chown node:node /var/lib/plow /etc/plow/openclaw
 COPY boot /opt/plow/boot
 COPY boot/gateway-password.sh /etc/profile.d/plow-openclaw.sh
+COPY boot/plow-llm.sh /usr/local/bin/plow-llm
 RUN printf '\n. /etc/profile.d/plow-openclaw.sh\n' >> /home/node/.bashrc
 COPY aha /opt/plow/aha
 COPY plugin /opt/plow/plugin

@@ -173,6 +173,40 @@ boot-owned and removed at every startup; `AGENTS.md` is boot-rendered. Do not
 store durable agent state in these files. Durable AHA state is SQLite under
 `/var/lib/plow/aha/` (override with `AHA_HOME` in tests).
 
+## Model
+
+Every install runs on Plow's GPT-6 Luna (`plow/openai/gpt-6-luna`), the chat
+and the worker's classify and draft calls alike. A one-click install has
+nothing to configure and never leaves it.
+
+The owner of one install can move all of it to their own OpenAI account. In
+a login shell on the agent (`docker compose exec agent bash -l`, or SSH on
+the VM):
+
+```sh
+plow-llm openai
+```
+
+It signs in with a device code, checks that the account offers
+`gpt-6-luna` and leaves a marker in the state volume. Restart the agent to
+apply it. The sign-in and the marker live in the state volume, so rebuilds
+and image updates keep them. `plow-llm plow` moves back, and
+`plow-llm status` shows what the next boot will choose.
+
+Off Plow, the worker's calls go through the gateway's OpenAI-compatible
+endpoint to a second agent, `aha-llm`, with no skills and one read-only tool
+(`session_status`): a post being classified has nothing it could act with. Plow's Luna stays configured as
+the fallback, so a spent quota or an expired sign-in answers from Plow
+instead of failing. `AGENT_PROVIDER` (`plow`, `openai`, `openrouter`) and
+`AGENT_MODEL` choose a provider from the environment instead and outrank the
+marker; OpenAI then takes `OPENAI_API_KEY` or the sign-in, and OpenRouter
+`OPENROUTER_API_KEY`.
+
+The sign-in is a real credential for your account, kept in the state volume
+where the agent's own tools can read it. AHA reads public posts, so use it
+on an install only you talk to, and know that a hostile post is text it
+reads next to that file.
+
 ## Behaviour and failures
 
 Set `PLOW_API_BASE` to the API root without `/v1`. Local runs also need

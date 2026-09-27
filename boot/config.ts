@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import JSON5 from "json5";
+import { PLOW_ROUTE, WORKER_AGENT, type LlmRoute } from "./llm.ts";
 
 export type Participant =
   | { type: "member"; uid: string; role: string }
@@ -12,7 +13,8 @@ export type Identity = {
   mcp_url?: string | null;
 };
 
-export function renderConfig(identity: Identity, apiBase: string) {
+export function renderConfig(identity: Identity, apiBase: string, llm: LlmRoute = PLOW_ROUTE) {
+  const offPlow = llm.provider !== "plow";
   const name = identity.agent?.name;
   if (typeof name !== "string" || !name.trim()) throw new Error(`Identity has no usable agent.name: ${JSON.stringify(name)}`);
   const email = identity.chats.flatMap(chat => chat.participants).find(p =>
@@ -27,6 +29,7 @@ export function renderConfig(identity: Identity, apiBase: string) {
       } },
       trustedProxies: ["127.0.0.1"],
       reload: { mode: "off" },
+      ...(offPlow ? { http: { endpoints: { chatCompletions: { enabled: true } } } } : {}),
     },
     models: { providers: { plow: {
       baseUrl: `${apiBase}/v1`, apiKey: "${PLOW_AGENT_TOKEN}", api: "openai-completions", authHeader: true,
@@ -35,9 +38,24 @@ export function renderConfig(identity: Identity, apiBase: string) {
         { id: "openai/gpt-6-luna", name: "GPT-6 Luna", input: ["text", "image"], contextWindow: 1050000, cost: { input: 0.10, output: 0.50 } },
       ],
     } } },
-    agents: { entries: { main: { identity: { name } } }, defaults: {
+    // The worker's agent makes a roster of two, which OpenClaw accepts only
+    // with explicit ownership and a named owner for ambient work: main.
+    agents: { ...(offPlow ? { ownership: "explicit" } : {}), entries: {
+      main: { identity: { name } },
+      ...(offPlow ? { [WORKER_AGENT]: { workspace: "/var/lib/plow/aha-llm", skills: [], tools: { profile: "minimal", allow: ["session_status"] } } } : {}),
+    }, defaults: {
       workspace: "/var/lib/plow/workspace", skipBootstrap: true,
-      model: { primary: "plow/openai/gpt-6-luna", fallbacks: [] }, sandbox: { mode: "off" },
+      model: { primary: llm.primary, fallbacks: llm.fallbacks }, sandbox: { mode: "off" },
+      // Off Plow, titles and recaps use the chosen model too: OpenAI's own
+      // small-model default is a model the owner did not pick.
+      ...(offPlow ? { utilityModel: llm.primary, systemAgent: { agentId: "main" } } : {}),
+      // Signed in with the owner's own account, an openai/* model may otherwise
+      // run on the native Codex harness, which skips this plugin's hooks and the
+      // per-sender tool policy. The empty allow list keeps the entry from reading
+      // as a legacy model restriction, so Plow's fallback stays selectable.
+      ...(llm.provider === "openai" ? {
+        models: { "openai/*": { agentRuntime: { id: "openclaw" } } }, modelPolicy: { allow: [] },
+      } : {}),
     } },
     mcp: { sessionIdleTtlMs: 300_000, ...(identity.mcp_url ? { servers: { plow: {
       url: "http://127.0.0.1:18790/mcp", transport: "streamable-http",
@@ -91,6 +109,7 @@ const ownedPaths = [
   ["tools", ["tools"]],
   ["commands", ["commands"]],
   ["identity", ["agents", "entries", "main", "identity"]],
+  ["worker-agent", ["agents", "entries", WORKER_AGENT]],
   // AHA's model and its skills ship with the image, as they did when every
   // boot rewrote the whole file.
   ["agent-defaults", ["agents", "defaults"]],
@@ -160,6 +179,13 @@ export async function syncConfig(
       await writeFile(includePath, JSON.stringify(value, null, 2) + "\n");
       parent[key] = { $include: includePath };
     }
+  }
+  // A scalar, so it is written in place rather than as an include. Removed
+  // only when the roster is back to one agent: an owner's own agents keep it.
+  const ownership = getPath(seed, ["agents", "ownership"]);
+  if (isObject(owner.agents)) {
+    if (ownership !== undefined) owner.agents.ownership = ownership;
+    else if (!isObject(owner.agents.entries) || Object.keys(owner.agents.entries).length <= 1) delete owner.agents.ownership;
   }
   const bindingPath = join(includeDir, "binding.json5");
   await writeFile(bindingPath, JSON.stringify(rendered.bindings[0], null, 2) + "\n");

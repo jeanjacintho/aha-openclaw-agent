@@ -156,3 +156,23 @@ test("an unparseable reply is kept on disk for inspection", async t => {
   const kept = await fs.readFile(path.join(home, "llm-invalid-last.txt"), "utf8");
   assert.match(kept, /classify openai\/gpt-6-luna\nsorry, no json today$/);
 });
+
+test("off Plow the worker asks the gateway's tool-less agent, with the gateway password", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok",
+    AHA_LLM_GATEWAY: "http://127.0.0.1:3000/v1/chat/completions", OPENCLAW_GATEWAY_PASSWORD: "pw" });
+  const result = await complete(req(), {
+    fetch: async (input, init) => {
+      assert.equal(String(input), "http://127.0.0.1:3000/v1/chat/completions");
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer pw");
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.model, "openclaw/aha-llm");
+      assert.equal("tools" in body, false);
+      return reply(JSON.stringify({ n: 2 }), { prompt_tokens: 7, completion_tokens: 3 });
+    },
+  });
+  assert.deepEqual(result, { ok: true, value: { n: 2 } });
+  // Still in the ledger, so the daily budget counts it.
+  assert.deepEqual(listUsage().map(row => [row.model, row.input, row.output]), [["openclaw/aha-llm", 7, 3]]);
+});

@@ -59,3 +59,16 @@ test("negative and NaN usage is rejected and not stored", async t => {
   assert.throws(() => recordUsage(call({ output: -1 })), /usage output must be a finite number >= 0/);
   await assert.rejects(fs.stat(path.join(home, "usage.jsonl")));
 });
+
+test("calls made through the gateway count toward the budget but are not exported twice", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-usage-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home });
+  recordUsage(call({ model: "openai/gpt-6-luna", input: 3, output: 1 }));
+  recordUsage(call({ model: "openclaw/aha-llm", input: 5, output: 2 }));
+  assert.deepEqual(dailyTotals("2026-09-22").map(row => row.model), ["openai/gpt-6-luna", "openclaw/aha-llm"]);
+  const out = await fs.mkdtemp(path.join(os.tmpdir(), "aha-ledger-out-"));
+  t.after(() => fs.rm(out, { recursive: true, force: true }));
+  // The gateway's own session already carries that call to the reporter.
+  assert.equal(exportLedger(out).added, 1);
+});

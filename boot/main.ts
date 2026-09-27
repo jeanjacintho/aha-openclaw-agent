@@ -4,6 +4,7 @@ import { startAha } from "../aha/worker.js";
 import { startAgentIndex } from "./agent-index.js";
 import { renderConfig, syncConfig } from "./config.js";
 import { identityFromApi } from "./identity.js";
+import { llmRoute } from "./llm.js";
 import { installBootLog } from "./log.js";
 import { renderPrompt } from "./prompt.js";
 import { startGateway } from "./process.js";
@@ -17,7 +18,13 @@ try {
   process.env.OPENCLAW_GATEWAY_PASSWORD = randomBytes(32).toString("hex");
   process.env.PLOW_MCP_BRIDGE_TOKEN = randomBytes(32).toString("hex");
   const identity = await identityFromApi(base, process.env.PLOW_AGENT_TOKEN);
-  const config = renderConfig(identity, base);
+  const { route, problem } = llmRoute();
+  if (problem) console.error(`plow-boot: llm: ${problem}`);
+  console.log(`plow-boot: llm ${route.provider} ${route.primary}${route.fallbacks.length ? ` (fallback ${route.fallbacks.join(", ")})` : ""}`);
+  const config = renderConfig(identity, base, route);
+  // The worker calls Plow directly on Plow's route, and the gateway otherwise.
+  if (route.provider === "plow") delete process.env.AHA_LLM_GATEWAY;
+  else process.env.AHA_LLM_GATEWAY = "http://127.0.0.1:3000/v1/chat/completions";
   await mkdir("/var/lib/plow/workspace", { recursive: true });
   await writeFile("/var/lib/plow/gateway-password", process.env.OPENCLAW_GATEWAY_PASSWORD + "\n", { mode: 0o600 });
   await chmod("/var/lib/plow/gateway-password", 0o600);

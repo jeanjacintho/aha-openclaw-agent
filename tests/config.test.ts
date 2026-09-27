@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import JSON5 from "json5";
 import { renderConfig, syncConfig, type Identity } from "../boot/config.ts";
+import { llmRoute } from "../boot/llm.ts";
 
 const identity: Identity = {
   agent: { name: "Juniper" },
@@ -243,3 +244,38 @@ test("MCP Plow server include disappears without a relay while owner MCP setting
   assert.deepEqual(again.mcp.servers.other, { url: "https://other.example" });
   assert.equal(again.mcp.sessionIdleTtlMs, 300_000);
 });
+
+test("Plow's route adds no gateway endpoint, worker agent or runtime policy", () => {
+  const config = renderConfig(identity, "http://api:8000");
+  assert.equal("http" in config.gateway, false);
+  assert.deepEqual(Object.keys(config.agents.entries), ["main"]);
+  assert.equal("ownership" in config.agents, false);
+  for (const key of ["models", "modelPolicy", "utilityModel", "systemAgent"]) assert.equal(key in config.agents.defaults, false, key);
+});
+
+test("an OpenAI route keeps Plow's Luna behind it and gives the worker a tool-less agent", () => {
+  const config = renderConfig(identity, "http://api:8000", llmRoute({}, "openai").route);
+  assert.deepEqual(config.agents.defaults.model, { primary: "openai/gpt-6-luna", fallbacks: ["plow/openai/gpt-6-luna"] });
+  assert.deepEqual(config.agents.defaults.models, { "openai/*": { agentRuntime: { id: "openclaw" } } });
+  assert.deepEqual(config.agents.defaults.modelPolicy, { allow: [] });
+  assert.equal(config.agents.defaults.utilityModel, "openai/gpt-6-luna");
+  assert.equal(config.agents.ownership, "explicit");
+  assert.deepEqual(config.agents.defaults.systemAgent, { agentId: "main" });
+  assert.deepEqual(config.gateway.http, { endpoints: { chatCompletions: { enabled: true } } });
+  assert.deepEqual(config.agents.entries["aha-llm"], { workspace: "/var/lib/plow/aha-llm", skills: [], tools: { profile: "minimal", allow: ["session_status"] } });
+});
+
+test("moving back to Plow removes the worker agent and the endpoint from an existing config", async t => {
+  const { path, includes } = await configFixture(t);
+  await syncConfig(renderConfig(identity, "http://api:8000", llmRoute({}, "openai").route), path, includes);
+  let owner = JSON5.parse(await readFile(path, "utf8"));
+  assert.deepEqual(owner.agents.entries["aha-llm"], { $include: join(includes, "worker-agent.json5") });
+  assert.equal(owner.agents.ownership, "explicit");
+  await syncConfig(renderConfig(identity, "http://api:8000"), path, includes);
+  owner = JSON5.parse(await readFile(path, "utf8"));
+  assert.equal(owner.agents.entries["aha-llm"], undefined);
+  assert.equal(owner.agents.ownership, undefined);
+  const gateway = JSON5.parse(await readFile(join(includes, "gateway.json5"), "utf8"));
+  assert.equal("http" in gateway, false);
+});
+
