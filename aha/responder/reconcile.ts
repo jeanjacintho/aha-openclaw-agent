@@ -12,6 +12,8 @@ import { threadLedgerKey } from "./reddit-url.ts";
 export const REDDIT_RECONCILE_LIMIT = 100;
 export const REDDIT_RECONCILE_GRACE_MS = 10 * 60 * 1000;
 export const REDDIT_RECONCILE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+export const REDDIT_RECONCILE_CLOCK_SKEW_MS = 2 * 60 * 1000;
+export const REDDIT_STALE_POSTING_MS = 15 * 60 * 1000;
 const USER_AGENT = REDDIT_USER_AGENT;
 const COMMENTS = "https://oauth.reddit.com/user";
 
@@ -32,7 +34,9 @@ type PendingPost = {
   itemUrl: string | null;
   draftId: number;
   body: string;
-  attemptAt: number;
+  lowerBoundAt: number;
+  graceStartedAt: number;
+  expiresAt: number;
 };
 
 export type ReconcileDeps = { fetch?: typeof fetch; now?: () => Date; auth?: RedditAuth };
@@ -40,6 +44,49 @@ export type ReconcileDeps = { fetch?: typeof fetch; now?: () => Date; auth?: Red
 function isRedditCredentials(value: unknown): value is { username: string } {
   return Boolean(value && typeof value === "object" && typeof (value as { username?: unknown }).username === "string"
     && (value as { username: string }).username.trim());
+}
+
+function freezeStalePosting(store: Store, now: Date) {
+  const rows = store.db.prepare(`SELECT key, url FROM ledger
+    WHERE key GLOB 'post:*:reddit:*' AND state = 'posting' ORDER BY key`).all() as { key: string; url: string | null }[];
+  let frozen = 0;
+  for (const row of rows) {
+    const externalId = row.key.split(":").at(-1);
+    if (!externalId) continue;
+    const item = store.db.prepare(`SELECT id, external_id AS externalId, url FROM items
+      WHERE source = 'reddit' AND external_id = ? ORDER BY id DESC LIMIT 1`).get(externalId) as {
+      id: number; externalId: string; url: string | null;
+    } | undefined;
+    if (!item) continue;
+    const draft = store.db.prepare(`SELECT id, body, approved_at AS approvedAt FROM drafts
+      WHERE item_id = ? AND state = 'approved' ORDER BY id DESC LIMIT 1`).get(item.id) as {
+      id: number; body: string; approvedAt: string | null;
+    } | undefined;
+    const approvedAt = draft?.approvedAt ? Date.parse(draft.approvedAt) : Number.NaN;
+    if (!draft || !Number.isFinite(approvedAt) || now.getTime() - approvedAt < REDDIT_STALE_POSTING_MS) continue;
+    const threadKey = threadLedgerKey("reddit", item.externalId, item.url ?? row.url);
+    const recovered = store.tx(() => {
+      const states = store.db.prepare("SELECT key, state FROM ledger WHERE key IN (?, ?)").all(row.key, threadKey) as {
+        key: string; state: string;
+      }[];
+      if (states.length !== 2 || states.some(entry => entry.state !== "posting")) return false;
+      store.db.prepare("UPDATE ledger SET state = 'uncertain' WHERE key IN (?, ?) AND state = 'posting'").run(row.key, threadKey);
+      recordDraftEvent(store, {
+        draftId: draft.id,
+        itemId: item.id,
+        actor: "system",
+        action: "uncertain",
+        body: draft.body,
+        detail: "stale_posting",
+        // approved_at is written before the HTTP request and is the best available
+        // attempt timestamp when a crash prevented a later outcome event.
+        at: new Date(approvedAt),
+      });
+      return true;
+    });
+    if (recovered) frozen += 1;
+  }
+  return frozen;
 }
 
 function getPendingPosts(store: Store, now: Date): { active: PendingPost[]; expired: PendingPost[] } {
@@ -55,16 +102,19 @@ function getPendingPosts(store: Store, now: Date): { active: PendingPost[]; expi
       id: number; externalId: string; url: string | null;
     } | undefined;
     if (!item) continue;
-    const draft = store.db.prepare(`SELECT id, body FROM drafts WHERE item_id = ? AND state = 'approved'
-      ORDER BY id DESC LIMIT 1`).get(item.id) as { id: number; body: string } | undefined;
+    const draft = store.db.prepare(`SELECT id, body, approved_at AS approvedAt FROM drafts WHERE item_id = ? AND state = 'approved'
+      ORDER BY id DESC LIMIT 1`).get(item.id) as { id: number; body: string; approvedAt: string | null } | undefined;
     if (!draft) continue;
+    const approvedAt = draft.approvedAt ? Date.parse(draft.approvedAt) : Number.NaN;
+    if (!Number.isFinite(approvedAt)) continue;
     const expiredEvent = store.db.prepare(`SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'reconcile_expired' LIMIT 1`)
       .get(draft.id);
     if (expiredEvent) continue;
     const attempt = store.db.prepare(`SELECT at FROM draft_events WHERE draft_id = ? AND action = 'uncertain'
       ORDER BY at DESC, id DESC LIMIT 1`).get(draft.id) as { at: string } | undefined;
-    const attemptAt = attempt ? Date.parse(attempt.at) : Number.NaN;
-    if (!Number.isFinite(attemptAt)) continue;
+    const uncertainAt = attempt ? Date.parse(attempt.at) : Number.NaN;
+    if (!Number.isFinite(uncertainAt)) continue;
+    const graceStartedAt = Math.max(uncertainAt, approvedAt);
     const post: PendingPost = {
       postKey: row.key,
       threadKey: threadLedgerKey("reddit", item.externalId, item.url ?? row.url),
@@ -73,9 +123,11 @@ function getPendingPosts(store: Store, now: Date): { active: PendingPost[]; expi
       itemUrl: item.url ?? row.url,
       draftId: draft.id,
       body: draft.body,
-      attemptAt,
+      lowerBoundAt: approvedAt - REDDIT_RECONCILE_CLOCK_SKEW_MS,
+      graceStartedAt,
+      expiresAt: Math.max(uncertainAt, approvedAt),
     };
-    if (now.getTime() - attemptAt >= REDDIT_RECONCILE_MAX_AGE_MS) expired.push(post);
+    if (now.getTime() - post.expiresAt >= REDDIT_RECONCILE_MAX_AGE_MS) expired.push(post);
     else active.push(post);
   }
   return { active, expired };
@@ -85,7 +137,7 @@ function commentMatches(comment: RedditComment, post: PendingPost, username: str
   if (comment.parent_id !== post.externalId || typeof comment.body !== "string") return false;
   if (typeof comment.author !== "string" || comment.author.toLowerCase() !== username.toLowerCase()) return false;
   if (typeof comment.created_utc !== "number" || !Number.isFinite(comment.created_utc)) return false;
-  if (comment.created_utc * 1000 < post.attemptAt) return false;
+  if (comment.created_utc * 1000 < post.lowerBoundAt) return false;
   return normalizeRedditBody(unescapeRedditBody(comment.body)) === normalizeRedditBody(post.body);
 }
 
@@ -140,6 +192,7 @@ export async function reconcileRedditPosts(store: Store, deps: ReconcileDeps = {
   if (!isRedditCredentials(secrets.reddit)) return { checked: 0, reconciled: 0, absent: 0, expired: 0 };
   const username = secrets.reddit.username;
   const now = deps.now?.() ?? new Date();
+  freezeStalePosting(store, now);
   const { active, expired } = getPendingPosts(store, now);
   for (const post of expired) recordResolution(store, post, "reconcile_expired");
   if (active.length === 0) return { checked: 0, reconciled: 0, absent: 0, expired: expired.length };
@@ -186,8 +239,8 @@ export async function reconcileRedditPosts(store: Store, deps: ReconcileDeps = {
       await notifyResolution(store, post, "found", url, deps);
       continue;
     }
-    const pastGrace = now.getTime() - post.attemptAt >= REDDIT_RECONCILE_GRACE_MS;
-    const listingCoversAttempt = listingIsShort || (oldestCreatedAt !== undefined && oldestCreatedAt <= post.attemptAt);
+    const pastGrace = now.getTime() - post.graceStartedAt >= REDDIT_RECONCILE_GRACE_MS;
+    const listingCoversAttempt = listingIsShort || (oldestCreatedAt !== undefined && oldestCreatedAt <= post.lowerBoundAt);
     if (listingCoversAttempt && pastGrace) {
       recordResolution(store, post, "absent", "absent", post.itemUrl);
       absent += 1;

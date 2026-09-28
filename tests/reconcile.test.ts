@@ -7,7 +7,7 @@ import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { writeSecrets } from "../aha/secrets.ts";
 import { runWorkerStages } from "../aha/worker.ts";
-import { REDDIT_RECONCILE_GRACE_MS, REDDIT_RECONCILE_LIMIT, REDDIT_RECONCILE_MAX_AGE_MS, reconcileRedditPosts } from "../aha/responder/reconcile.ts";
+import { REDDIT_RECONCILE_CLOCK_SKEW_MS, REDDIT_RECONCILE_GRACE_MS, REDDIT_RECONCILE_LIMIT, REDDIT_RECONCILE_MAX_AGE_MS, REDDIT_STALE_POSTING_MS, reconcileRedditPosts } from "../aha/responder/reconcile.ts";
 import { recordDraftEvent } from "../aha/responder/draft-events.ts";
 import { checkPolicy } from "../aha/responder/policy.ts";
 import { postReply } from "../aha/responder/post.ts";
@@ -31,7 +31,9 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   }
 }
 
-async function fixture(t: import("node:test").TestContext, options: { attemptAgoMs?: number; posts?: number } = {}) {
+async function fixture(t: import("node:test").TestContext, options: {
+  attemptAgoMs?: number; posts?: number; uncertainDelayMs?: number; ledgerState?: "uncertain" | "posting";
+} = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-reconcile-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
@@ -55,11 +57,18 @@ async function fixture(t: import("node:test").TestContext, options: { attemptAgo
       VALUES (?, ?, 'approved', ?, ?)`)
       .run(itemId, BODY, hash, attemptAt.toISOString());
     const draftId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+    recordDraftEvent(store, { draftId, itemId, actor: "owner", action: "approved", body: BODY, at: attemptAt });
     const postKey = `post:2026-09-23:reddit:testaha:${externalId}`;
     const threadKey = `thread:reddit:t3_${i === 0 ? "xyz" : `post${i}`}`;
-    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'uncertain', ?)").run(postKey, itemUrl);
-    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'uncertain', ?)").run(threadKey, itemUrl);
-    recordDraftEvent(store, { draftId, itemId, actor: "system", action: "uncertain", body: BODY, at: attemptAt });
+    const ledgerState = options.ledgerState ?? "uncertain";
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, ?, ?)").run(postKey, ledgerState, itemUrl);
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, ?, ?)").run(threadKey, ledgerState, itemUrl);
+    if (ledgerState === "uncertain") {
+      recordDraftEvent(store, {
+        draftId, itemId, actor: "system", action: "uncertain", body: BODY,
+        at: new Date(attemptAt.getTime() + (options.uncertainDelayMs ?? 0)),
+      });
+    }
     posts.push({ itemId, draftId, postKey, threadKey, externalId });
   }
   return { store, posts, attemptAt };
@@ -109,8 +118,8 @@ function makeFetcher(listing: () => Response) {
 const testAuth = { token: async () => "access-token", invalidate() {}, canPost: true };
 
 test("an uncertain Reddit post found in the user's comments becomes verified and notifies once", async t => {
-  const { store, posts, attemptAt } = await fixture(t);
-  const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 60_000)]));
+  const { store, posts, attemptAt } = await fixture(t, { uncertainDelayMs: 30_000 });
+  const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 10_000)]));
   const deps = { auth: testAuth, fetch: fetch.fetch, now: () => NOW };
   const result = await reconcileRedditPosts(store, deps);
   assert.deepEqual(result, { checked: 1, reconciled: 1, absent: 0, expired: 0 });
@@ -123,6 +132,45 @@ test("an uncertain Reddit post found in the user's comments becomes verified and
   await reconcileRedditPosts(store, deps);
   assert.equal(fetch.urls.filter(url => url.includes("/comments?")).length, 1);
   assert.equal(fetch.messages.length, 1);
+});
+
+test("a comment created before the uncertain event but after approval is still found", async t => {
+  const { store, posts, attemptAt } = await fixture(t, { uncertainDelayMs: 30_000 });
+  const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 10_000)]));
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 1, reconciled: 1, absent: 0, expired: 0 });
+  assert.equal(state(store, posts[0].postKey).state, "verified");
+});
+
+test("a comment older than approved_at minus the clock margin does not match", async t => {
+  const { store, posts, attemptAt } = await fixture(t, { uncertainDelayMs: 30_000 });
+  const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() - REDDIT_RECONCILE_CLOCK_SKEW_MS - 1000)]));
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 1, reconciled: 0, absent: 1, expired: 0 });
+  assert.equal(state(store, posts[0].postKey).state, "absent");
+  assert.equal(latestEvent(store, posts[0].draftId).action, "absent");
+});
+
+test("an old posting ledger is frozen as uncertain and reconciled", async t => {
+  const { store, posts, attemptAt } = await fixture(t, { ledgerState: "posting" });
+  const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 10_000)]));
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 1, reconciled: 1, absent: 0, expired: 0 });
+  const events = store.db.prepare(`SELECT action, detail FROM draft_events WHERE draft_id = ? ORDER BY id`).all(posts[0].draftId) as {
+    action: string; detail: string | null;
+  }[];
+  assert.deepEqual(events.map(event => [event.action, event.detail]), [["approved", null], ["uncertain", "stale_posting"], ["reconciled", null]]);
+  assert.equal(state(store, posts[0].postKey).state, "verified");
+});
+
+test("a recent posting ledger is left alone while its send may still be in progress", async t => {
+  const { store, posts } = await fixture(t, { attemptAgoMs: REDDIT_STALE_POSTING_MS - 1000, ledgerState: "posting" });
+  const fetch = makeFetcher(() => { throw new Error("must not list while posting is recent"); });
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 0, reconciled: 0, absent: 0, expired: 0 });
+  assert.equal(state(store, posts[0].postKey).state, "posting");
+  assert.equal(fetch.urls.length, 0);
+  assert.equal(latestEvent(store, posts[0].draftId).action, "approved");
 });
 
 test("a covered listing after the grace period marks a post absent", async t => {
