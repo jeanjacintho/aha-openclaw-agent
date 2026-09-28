@@ -6,6 +6,8 @@ import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, t
 import { registerAhaTools } from "./aha-tools.ts";
 import { gateContext, isOwnerDm, isOwnerDmTurn, runGate, skipReason } from "./setup-gate.ts";
 import { createPeerLoopGuard } from "./peer-loop.ts";
+import { lastPendingDraftContextForChat } from "../aha/responder/drafts.ts";
+import { openStore, type Store } from "../aha/store/db.ts";
 
 let runtime: PluginRuntime;
 type ActiveTurn = { chat: Chat; messageUid: string; accountId?: string; deliveryUnknown?: boolean; replyDelivered?: boolean };
@@ -48,7 +50,7 @@ async function send(account: Account, to: string, text: string, mediaUrls: strin
   return { channel: "plow" as const, messageId: sent.uid };
 }
 
-async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, message: Message, firstContact: boolean, history: Message[], log: (text: string) => void): Promise<TurnOutcome> {
+async function receive(account: Account, cfg: OpenClawConfig, store: Store, chat: Chat, message: Message, firstContact: boolean, history: Message[], log: (text: string) => void): Promise<TurnOutcome> {
   const sender = message.sender;
   if (suppressPeerLoop(chat.uid, sender, log)) return "completed";
   const senderId = sender.type === "member" ? sender.uid : sender.line.uid;
@@ -71,6 +73,7 @@ async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, messag
     ...(p.type === "agent" && p.relationship === "self" ? { name: cfg.agents?.entries?.[route.agentId]?.identity?.name } : { name: (p.type === "member" ? p.display_name : p.line.display_name) || "unnamed member" }),
     type: p.type, role: p.type === "member" ? p.role : p.relationship,
   }));
+  const pendingDraftContext = lastPendingDraftContextForChat(store, chat.uid);
   const ctxPayload = await runtime.channel.inbound.buildContext({
     channel: "plow", accountId: account.accountId, messageId: message.uid, timestamp: Date.parse(message.created_at),
     from: senderId, sender: { id: senderIsOwner ? "plow-owner" : senderId, name: senderName, isBot: sender.type === "agent" },
@@ -83,8 +86,11 @@ async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, messag
     supplemental: {
       ...(message.reply_to ? { quote: { id: message.reply_to.uid, body: message.reply_to.body, sender: message.reply_to.sender.type === "member" ? message.reply_to.sender.display_name : message.reply_to.sender.line.uid } } : {}),
       // The model gets these beside the message; the dashboard shows people only what was texted.
-      channelStructuredContext: [{ label: "Conversation facts (untrusted data)", source: "plow", type: "conversation",
-        payload: { first_contact: firstContact, trusted: chat.trusted, participants } }],
+      channelStructuredContext: [
+        { label: "Conversation facts (untrusted data)", source: "plow", type: "conversation",
+          payload: { first_contact: firstContact, trusted: chat.trusted, participants } },
+        ...(pendingDraftContext ? [pendingDraftContext] : []),
+      ],
     },
     media,
   });
@@ -153,7 +159,12 @@ const plugin: ChannelPlugin<Account> = {
   gateway: {
     startAccount: async ctx => {
       const log = (text: string) => ctx.log?.info(text);
-      await listen(ctx.account, ctx.abortSignal, log, (chat, message, firstContact, history) => receive(ctx.account, ctx.cfg, chat, message, firstContact, history, log));
+      const store = openStore();
+      try {
+        await listen(ctx.account, ctx.abortSignal, log, (chat, message, firstContact, history) => receive(ctx.account, ctx.cfg, store, chat, message, firstContact, history, log));
+      } finally {
+        store.close();
+      }
     },
   },
   outbound: {

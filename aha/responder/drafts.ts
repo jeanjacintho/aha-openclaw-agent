@@ -38,6 +38,25 @@ type ItemContext = {
   topic: string | null;
 };
 
+export function lastPendingDraftContextForChat(store: Store, chatUid: string) {
+  const row = store.db.prepare(`SELECT items.id AS itemId
+    FROM drafts
+    JOIN items ON items.id = drafts.item_id
+    JOIN deliveries ON deliveries.chat_uid = ?
+      AND deliveries.status = 'sent'
+      AND deliveries.key LIKE ('draft:' || items.id || ':%')
+    WHERE drafts.state = 'pending'
+    ORDER BY drafts.id DESC
+    LIMIT 1`).get(chatUid) as { itemId: number } | undefined;
+  if (!row) return undefined;
+  return {
+    label: "Last pending AHA draft notified in this chat",
+    source: "plow",
+    type: "notification",
+    payload: { last_pending_item: `AHA-${row.itemId}`, state: "pending" },
+  };
+}
+
 function redLine(category: string | null, topic: string | null) {
   return category === "security" || category === "legal" || category === "pricing"
     || /imprensa|press|ameaça|threat|saúde|health|política|politic|dado pessoal|pii/i.test(topic ?? "");
