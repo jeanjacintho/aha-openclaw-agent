@@ -46,7 +46,7 @@ function cover(store: Store, weeks: { start: string; end: string }[], sources = 
   }
 }
 
-test("a week with a source down is unknown, not zero", async t => {
+test("a temporarily failed source keeps that week unknown even if another source succeeded", async t => {
   const store = await home(t);
   const topicId = assignTopic(store, "Login bug");
   cover(store, [W36, W37, W38]);
@@ -85,7 +85,7 @@ test("trend alert needs current week >= 3 and >= 2x the mean of known prior week
   assert.match(sentence, /PH 1/);
 });
 
-test("null prior weeks are omitted from the mean, not treated as zero", async t => {
+test("partially observed prior weeks are omitted from the historical mean", async t => {
   const store = await home(t);
   assignTopic(store, "Login bug");
   cover(store, [W36, W38, W39]);
@@ -97,7 +97,7 @@ test("null prior weeks are omitted from the mean, not treated as zero", async t 
   for (let i = 0; i < 5; i++) mention(store, { ext: `n${i}`, published: W39.mid, topic: "Login bug", source: i < 3 ? "hn" : "ph" });
   const alerts = detectTrends(store, new Date(W39.mid));
   assert.equal(alerts.length, 1);
-  assert.equal(alerts[0].average, 2, "mean of W36=2 and W38=2; W37 null is skipped");
+  assert.equal(alerts[0].average, 2, "mean includes known W36=2 and W38=2; partial W37 is skipped");
   assert.equal(alerts[0].current, 5);
 });
 
@@ -136,7 +136,7 @@ test("irrelevant and competitor items do not count toward a trend", async t => {
   assert.deepEqual(alerts[0].bySource, [{ source: "hn", count: 3 }, { source: "ph", count: 1 }]);
 });
 
-test("current week of 2 does not alert even when it is 2x a 0.5 mean", async t => {
+test("a current week of 2 does not alert while the historical mean is 0.5", async t => {
   const store = await home(t);
   assignTopic(store, "Login bug");
   cover(store, [W36, W37, W39]);
@@ -155,7 +155,7 @@ test("current week of 2 does not alert even when it is 2x a 0.5 mean", async t =
   assert.equal(detectTrends(store, now).length, 0);
 });
 
-test("a source seen in the lookback with no ok run that week makes the week unknown", async t => {
+test("a source that succeeds elsewhere in the lookback still makes its failed week unknown", async t => {
   const store = await home(t);
   const topicId = assignTopic(store, "Login bug");
   cover(store, [W36, W37, W39]);
@@ -163,4 +163,63 @@ test("a source seen in the lookback with no ok run that week makes the week unkn
   mention(store, { ext: "1", published: W38.mid, topic: "Login bug" });
   const rows = weeklyCounts(store, topicId, 4, new Date(W39.mid));
   assert.equal(rows.find(row => row.week === "2026-W38")?.count, null);
+});
+
+test("a source down in prior weeks and healthy in the current week does not cause a false trend", async t => {
+  const store = await home(t);
+  const topicId = assignTopic(store, "Login bug");
+  for (const week of [W36, W37, W38, W39]) {
+    run(store, "hn", week.start, week.end, "ok");
+    run(store, "site", week.start, week.end, "ok");
+    run(store, "reddit", week.start, week.end, week === W39 ? "ok" : "error");
+    mention(store, { source: "hn", ext: `hn-${week.start}`, published: week.mid, topic: "Login bug" });
+  }
+  for (let i = 0; i < 3; i++) mention(store, { source: "reddit", ext: `rd-${i}`, published: W39.mid, topic: "Login bug" });
+  const rows = weeklyCounts(store, topicId, 4, new Date(W39.mid));
+  assert.deepEqual(rows.map(row => row.count), [null, null, null, 4]);
+  assert.equal(detectTrends(store, new Date(W39.mid)).length, 0);
+});
+
+test("a source with no successful runs in the lookback does not block healthy-source trends", async t => {
+  const store = await home(t);
+  assignTopic(store, "Login bug");
+  for (const week of [W36, W37, W38, W39]) {
+    run(store, "hn", week.start, week.end, "ok");
+    run(store, "ph", week.start, week.end, "error");
+    run(store, "site", week.start, week.end, "ok");
+  }
+  for (const week of [W36, W37, W38]) {
+    for (let i = 0; i < 2; i++) mention(store, { source: "hn", ext: `hn-${week.start}-${i}`, published: week.mid, topic: "Login bug" });
+  }
+  for (let i = 0; i < 4; i++) mention(store, { source: "hn", ext: `hn-now-${i}`, published: W39.mid, topic: "Login bug" });
+  const alerts = detectTrends(store, new Date(W39.mid));
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].current, 4);
+  assert.equal(alerts[0].average, 2);
+});
+
+test("site-watch success alone does not make a week known", async t => {
+  const store = await home(t);
+  const topicId = assignTopic(store, "Login bug");
+  for (const week of [W36, W37, W38, W39]) {
+    run(store, "site", week.start, week.end, "ok");
+    run(store, "hn", week.start, week.end, "error");
+  }
+  assert.deepEqual(weeklyCounts(store, topicId, 4, new Date(W39.mid)).map(row => row.count), [null, null, null, null]);
+});
+
+test("a week with all source runs failed is unknown", async t => {
+  const store = await home(t);
+  const topicId = assignTopic(store, "Login bug");
+  cover(store, [W36, W37, W38]);
+  run(store, "hn", W39.start, W39.end, "error");
+  run(store, "ph", W39.start, W39.end, "limitada");
+  assert.equal(weeklyCounts(store, topicId, 4, new Date(W39.mid)).at(-1)?.count, null);
+});
+
+test("a week with no source runs remains unknown", async t => {
+  const store = await home(t);
+  const topicId = assignTopic(store, "Login bug");
+  cover(store, [W36, W37, W39]);
+  assert.equal(weeklyCounts(store, topicId, 4, new Date(W39.mid)).find(row => row.week === "2026-W38")?.count, null);
 });

@@ -36,8 +36,10 @@ function sourceName(source: string) {
 }
 
 function rangeSources(store: Store, start: Date, end: Date) {
+  // Site-watch health is independent of content-source coverage. Sources that
+  // never succeed in this lookback cannot make every weekly count unknown.
   return (store.db.prepare(
-    "SELECT DISTINCT source FROM source_runs WHERE window_end > ? AND window_start < ?",
+    "SELECT DISTINCT source FROM source_runs WHERE window_end > ? AND window_start < ? AND status = 'ok' AND source <> 'site'",
   ).all(start.toISOString(), end.toISOString()) as { source: string }[]).map(row => row.source);
 }
 
