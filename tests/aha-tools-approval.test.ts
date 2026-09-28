@@ -127,8 +127,10 @@ test("aha_not_us records a negative example used by classify", async t => {
   t.after(() => store.close());
   const row = store.db.prepare("SELECT kind, text FROM feedback_examples WHERE item_id = ?").get(itemId) as { kind: string; text: string };
   assert.equal(row.kind, "negative");
-  assert.match(row.text, new RegExp(`^NOT US AHA-${itemId}$`));
-  assert.equal(row.text.includes("Plow queues"), false);
+  assert.match(row.text, new RegExp(`^NOT US AHA-${itemId}`));
+  assert.match(row.text, /source: hn/);
+  assert.match(row.text, /title: Plow queues/);
+  assert.match(row.text, /post: Does plow queue jobs\?/);
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(itemId) as { state: string }).state, "irrelevant");
 });
 
