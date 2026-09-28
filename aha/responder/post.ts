@@ -60,7 +60,7 @@ function freezePosting(store: Store, key: string, url: string | null) {
   store.db.prepare("UPDATE ledger SET state = 'uncertain', url = ? WHERE key = ? AND state = 'posting'").run(url, key);
 }
 
-type PostClaimResult = PostResult | "owned" | "already_posted" | "thread_taken";
+type PostClaimResult = PostResult | "owned" | "already_posted" | "already_absent" | "thread_taken";
 
 function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostClaimResult {
   return store.tx(() => {
@@ -73,6 +73,7 @@ function claimKeys(store: Store, postKey: string, threadKey: string, url: string
     }
     if (post?.state === "posted" || post?.state === "verified") return "already_posted";
     if (thread?.state === "posted" || thread?.state === "verified") return "thread_taken";
+    if (post?.state === "absent" || thread?.state === "absent") return "already_absent";
     if (post?.state === "uncertain" || thread?.state === "uncertain") return "uncertain";
     const threadReadyForeign = thread?.state === "ready" && post?.state !== "ready" && post?.state !== "failed";
     if (threadReadyForeign) return "thread_taken";
@@ -100,14 +101,14 @@ function commentId(payload: unknown): { id: string; permalink?: string } | undef
 
 type VerifyResult = { status: "verified" } | { status: "mismatch"; detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed" } | { status: "unavailable" };
 
-function normalizeRedditBody(value: string) {
+export function normalizeRedditBody(value: string) {
   return value
     .replace(/\r\n?/g, "\n")
     .split("\n").map(line => line.replace(/[ \t]+$/g, "")).join("\n")
     .trimEnd();
 }
 
-function unescapeRedditBody(value: string) {
+export function unescapeRedditBody(value: string) {
   return value.replace(/&(amp|lt|gt);/g, entity => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">" })[entity]!);
 }
 
@@ -142,8 +143,8 @@ async function notifyUncertain(store: Store, itemId: number, key: string, deps: 
   if (!owner) return;
   const lang = getConfig(store)?.language || "en";
   const text = lang.startsWith("pt")
-    ? `Post incerto AHA-${itemId}. Não vou repostar. Confira o thread.`
-    : `Uncertain Reddit post for AHA-${itemId}. I will not retry. Check the thread.`;
+    ? `Post incerto AHA-${itemId}. Vou conferir automaticamente e aviso você quando houver uma confirmação.`
+    : `Uncertain Reddit post for AHA-${itemId}. I will check automatically and let you know when it is resolved.`;
   try {
     await sendToChat(owner, text, `uncertain:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
@@ -234,6 +235,10 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     }
     if (claimed === "thread_taken") {
       event("post_refused", "thread_taken");
+      return "failed";
+    }
+    if (claimed === "already_absent") {
+      event("post_refused", "already_absent");
       return "failed";
     }
     event(claimed === "uncertain" ? "uncertain" : "failed");

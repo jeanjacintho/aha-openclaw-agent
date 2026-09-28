@@ -3,6 +3,7 @@ import { getConfig } from "./config.ts";
 import { classifyNewItems, deliverDigest } from "./digest/deliver.ts";
 import { draftAndNotify, notifyExpiredDrafts } from "./responder/drafts.ts";
 import { runPromiseChecks } from "./promises/check.ts";
+import { reconcileRedditPosts } from "./responder/reconcile.ts";
 import { ahaHome } from "./home.ts";
 import { runIngest } from "./pipeline/ingest.ts";
 import { retryUncertainDeliveries, type SendResult } from "./notify/plow.ts";
@@ -37,6 +38,7 @@ async function ingestThenClassify() {
       { name: "classification", run: () => classifyNewItems(store) },
       { name: "draft notifications", run: () => draftAndNotify(store) },
       { name: "promise checks", run: () => runPromiseChecks(store, new Date()) },
+      { name: "reddit reconciliation", run: () => reconcileRedditPosts(store) },
       { name: "notification retries", run: () => retryUncertainDeliveries(store) },
     ]);
   } finally {
