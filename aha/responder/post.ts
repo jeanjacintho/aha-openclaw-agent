@@ -98,11 +98,43 @@ function commentId(payload: unknown): { id: string; permalink?: string } | undef
   return { id, permalink: thing?.permalink };
 }
 
-async function verify(http: typeof fetch, token: string, fullname: string) {
+type VerifyResult = { status: "verified" } | { status: "mismatch"; detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed" } | { status: "unavailable" };
+
+function normalizeRedditBody(value: string) {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .split("\n").map(line => line.replace(/[ \t]+$/g, "")).join("\n")
+    .trimEnd();
+}
+
+function unescapeRedditBody(value: string) {
+  return value.replace(/&(amp|lt|gt);/g, entity => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">" })[entity]!);
+}
+
+async function verify(
+  http: typeof fetch,
+  token: string,
+  fullname: string,
+  parentId: string,
+  approvedBody: string,
+  expectedAuthor?: string,
+): Promise<VerifyResult> {
   const response = await http(`${INFO}?id=${encodeURIComponent(fullname)}`, withHttpTimeout({ headers: oauthHeaders(token) }));
-  if (!response.ok) return false;
-  const payload = await response.json() as { data?: { children?: { data?: { name?: string } }[] } };
-  return (payload.data?.children ?? []).some(child => child.data?.name === fullname);
+  if (!response.ok) return { status: "unavailable" };
+  const payload = await response.json() as { data?: { children?: { data?: {
+    name?: string; parent_id?: string; body?: string; author?: string;
+  } }[] } };
+  const comment = (payload.data?.children ?? []).find(child => child.data?.name === fullname)?.data;
+  if (!comment || typeof comment.parent_id !== "string" || typeof comment.body !== "string") return { status: "unavailable" };
+  const body = normalizeRedditBody(unescapeRedditBody(comment.body));
+  if (body === "[removed]" || body === "[deleted]") return { status: "mismatch", detail: "removed" };
+  if (comment.parent_id !== parentId) return { status: "mismatch", detail: "parent_mismatch" };
+  if (body !== normalizeRedditBody(approvedBody)) return { status: "mismatch", detail: "body_mismatch" };
+  if (expectedAuthor) {
+    if (typeof comment.author !== "string") return { status: "unavailable" };
+    if (comment.author.toLowerCase() !== expectedAuthor.toLowerCase()) return { status: "mismatch", detail: "author_mismatch" };
+  }
+  return { status: "verified" };
 }
 
 async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps) {
@@ -114,6 +146,33 @@ async function notifyUncertain(store: Store, itemId: number, key: string, deps: 
     : `Uncertain Reddit post for AHA-${itemId}. I will not retry. Check the thread.`;
   try {
     await sendToChat(owner, text, `uncertain:${key}`, { store, fetch: deps.fetch, now: deps.now });
+  } catch {
+    /* unit tests may omit Plow env */
+  }
+}
+
+async function notifyVerificationMismatch(
+  store: Store,
+  itemId: number,
+  key: string,
+  detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed",
+  url: string | null,
+  deps: PostDeps,
+) {
+  const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
+  if (!owner) return;
+  const lang = getConfig(store)?.language || "en";
+  const reason = {
+    parent_mismatch: { pt: "a resposta caiu em outro comentário ou post", en: "the reply landed under a different comment or post" },
+    body_mismatch: { pt: "o texto publicado difere do aprovado", en: "the published text differs from the approved text" },
+    author_mismatch: { pt: "a resposta foi publicada por outra conta", en: "the reply was posted by another account" },
+    removed: { pt: "a resposta foi removida pela moderação", en: "the reply was removed by moderators" },
+  }[detail];
+  const text = lang.startsWith("pt")
+    ? `Verificação do post AHA-${itemId}: ${reason.pt}. Confira: ${url ?? "link indisponível"}`
+    : `AHA-${itemId} post verification: ${reason.en}. Check: ${url ?? "link unavailable"}`;
+  try {
+    await sendToChat(owner, text, `verify:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
     /* unit tests may omit Plow env */
   }
@@ -240,13 +299,22 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     : item.url;
   finish(store, key, thread, "posted", postedUrl);
   event("posted");
+  let verification: VerifyResult;
   try {
-    if (await verify(http, await auth.token(), parsed.id)) {
-      finish(store, key, thread, "verified", postedUrl);
-      event("verified");
-    }
+    const credential = readSecrets().reddit;
+    const expectedAuthor = typeof credential === "object" ? credential.username : undefined;
+    verification = await verify(http, await auth.token(), parsed.id, item.externalId, draft.body, expectedAuthor);
   } catch {
-    /* posted stands if the re-read fails */
+    verification = { status: "unavailable" };
+  }
+  if (verification.status === "verified") {
+    finish(store, key, thread, "verified", postedUrl);
+    event("verified");
+  } else if (verification.status === "mismatch") {
+    event("verify_mismatch", verification.detail);
+    await notifyVerificationMismatch(store, draft.itemId, key, verification.detail, postedUrl, deps);
+  } else {
+    event("verify_unavailable", "verify_unavailable");
   }
   return "posted";
 }
