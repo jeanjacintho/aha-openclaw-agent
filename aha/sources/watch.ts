@@ -13,11 +13,18 @@ export function agentIndexSlug(cfg: AhaConfig | null) {
 }
 
 export function watchAdapters(cfg: AhaConfig | null, secrets: Secrets = readSecrets()): SourceAdapter[] {
-  return [
+  const adapters = [
     hnSource(),
     agentIndexSource({ token: secrets.github ?? "", slug: agentIndexSlug(cfg) }),
     productHuntSource({ token: secrets.productHunt ?? "" }),
     githubSource({ token: secrets.github ?? "", repos: parseGithubRepos(cfg) }),
     redditSource({ auth: redditAuth(secrets.reddit) }),
   ];
+  return adapters.map(adapter => ({
+    ...adapter,
+    enabled(config) {
+      const selected = config.sources;
+      return (!selected?.length || selected.includes(adapter.id)) && adapter.enabled(config);
+    },
+  }));
 }

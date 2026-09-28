@@ -322,6 +322,19 @@ test("worker and tools share the Agent Index slug", () => {
   assert.equal(adapters[4].enabled({ company: { name: "Plow" } }), false);
 });
 
+test("watch adapters respect chosen sources while retaining credential checks", () => {
+  const selected = { company: { name: "Plow" }, sources: ["reddit"], githubRepos: ["plow-pbc/plow-agents"], agentIndexSlug: "aha" };
+  const credentials = { github: "gh-token", productHunt: "ph-token", reddit: "reddit-token" };
+  const selectedIds = watchAdapters(selected, credentials).filter(adapter => adapter.enabled(selected)).map(adapter => adapter.id);
+  assert.deepEqual(selectedIds, ["reddit"]);
+
+  for (const sources of [undefined, []]) {
+    const legacy = { ...selected, sources };
+    const enabledIds = watchAdapters(legacy, credentials).filter(adapter => adapter.enabled(legacy)).map(adapter => adapter.id);
+    assert.deepEqual(enabledIds, ["hn", "agent-index", "ph", "github", "reddit"]);
+  }
+});
+
 const ownerDm = { senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" };
 
 function status(dir: string) {
