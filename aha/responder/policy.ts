@@ -59,6 +59,25 @@ function threadTaken(store: Store, source: string, externalId: string, url: stri
   return row != null && (COUNTED as readonly string[]).includes(row.state);
 }
 
+export function postingLimitReasons(store: Store, itemId: number, now: Date): string[] {
+  const row = store.db.prepare("SELECT source, external_id AS externalId, url FROM items WHERE id = ?")
+    .get(itemId) as { source: string; externalId: string; url: string | null } | undefined;
+  if (!row) return ["item not found"];
+  const day = ymd(now);
+  const total = countLedger(store, `post:${day}:%`);
+  const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
+  const community = countLedger(store, sub ? `post:${day}:reddit:${sub}:%` : `post:${day}:${row.source}:%`);
+  const reasons: string[] = [];
+  if (total >= TOTAL_DAY) reasons.push("daily posting limit reached");
+  if (community >= COMMUNITY_DAY) reasons.push("community posting limit reached");
+  if (threadTaken(store, row.source, row.externalId, row.url)) reasons.push("thread already has a counted post");
+  return reasons;
+}
+
+export function postingPaused(store: Store) {
+  return (store.db.prepare("SELECT paused FROM flags WHERE id = 1").get() as { paused: number } | undefined)?.paused !== 0;
+}
+
 export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult {
   const cfg = getConfig(store);
   const row = store.db.prepare(`SELECT items.source, items.external_id, items.url, items.title, items.body,
@@ -79,11 +98,7 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
     store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(draft.itemId);
   }
   if ((row.confidence ?? 0) < 0.8) reasons.push(POLICY.confidence);
-  const day = ymd(now);
-  const total = countLedger(store, `post:${day}:%`);
-  const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
-  const community = countLedger(store, sub ? `post:${day}:reddit:${sub}:%` : `post:${day}:${row.source}:%`);
-  if (total >= TOTAL_DAY || community >= COMMUNITY_DAY || threadTaken(store, row.source, row.external_id, row.url)) {
+  if (postingLimitReasons(store, draft.itemId, now).length > 0) {
     reasons.push(POLICY.rateLimit);
   }
   const valid = validateReply(draft.body, {
@@ -93,8 +108,7 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
     links: cfg.links,
   }, "strict");
   if (!valid.ok) reasons.push(POLICY.validator);
-  const paused = (store.db.prepare("SELECT paused FROM flags WHERE id = 1").get() as { paused: number } | undefined)?.paused !== 0;
-  if (paused) reasons.push(POLICY.paused);
+  if (postingPaused(store)) reasons.push(POLICY.paused);
   return reasons.length === 0 ? { allow: true } : { allow: false, reasons };
 }
 

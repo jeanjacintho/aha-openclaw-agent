@@ -9,9 +9,9 @@ import { ahaHome } from "../aha/home.ts";
 import { normalizeSourceId, watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { ForgetError, forgetByUrlOrAuthor } from "../aha/store/retention.ts";
-import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
+import { checkPolicy, postingLimitReasons, postingPaused, recordReady } from "../aha/responder/policy.ts";
 import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
-import { postReply, threadLedgerKey, type PostResult } from "../aha/responder/post.ts";
+import { postReply, retryAbsentPost, threadLedgerKey, postLedgerKey, type PostResult } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { recordDraftEvent } from "../aha/responder/draft-events.ts";
 import { parseDue } from "../aha/promises/check.ts";
@@ -853,6 +853,63 @@ export function registerAhaTools(api: {
   }));
 
   api.registerTool(ctx => ({
+    name: "aha_retry",
+    label: "Retry an absent AHA Reddit post",
+    description: "Retry once a Reddit post that reconciliation conclusively marked absent. This tool call is the human approval to resend. Owner or a member of the item's role. Never use for uncertain posts.",
+    parameters: {
+      type: "object",
+      required: ["draftId"],
+      additionalProperties: false,
+      properties: { draftId: { type: ["integer", "string"], description: "The item id in AHA-n form." } },
+    },
+    async execute(_id, args) {
+      const denied = requireMember(ctx);
+      if (denied) return denied;
+      const id = publicId(args.draftId);
+      if (!id) return fail("draftId is required");
+      const store = openStore();
+      try {
+        const draft = store.db.prepare(`SELECT id, item_id AS itemId, body, state FROM drafts
+          WHERE item_id = ? AND state = 'approved' ORDER BY id DESC LIMIT 1`).get(id) as Draft | undefined;
+        if (!draft) return fail("draft not found");
+        const blocked = canActOnItem(store, ctx, draft.itemId);
+        if (blocked) return blocked;
+        const item = store.db.prepare("SELECT source, external_id AS externalId, url FROM items WHERE id = ?")
+          .get(draft.itemId) as { source: string; externalId: string; url: string | null } | undefined;
+        if (!item || item.source !== "reddit") return fail("only Reddit drafts can be retried");
+        if (draft.state !== "approved") return fail("draft must be approved before it can be retried");
+        const approved = store.db.prepare("SELECT approved_sha256 AS approvedSha256, approved_at AS approvedAt FROM drafts WHERE id = ?")
+          .get(draft.id) as { approvedSha256: string | null; approvedAt: string | null } | undefined;
+        const hash = createHash("sha256").update(draft.body).digest("hex");
+        if (!approved?.approvedSha256 || hash !== approved.approvedSha256) return fail("approved draft content changed; retry refused");
+        if (!approved.approvedAt) return fail("approval timestamp is missing; retry refused");
+        const approvedDate = new Date(approved.approvedAt);
+        if (!Number.isFinite(approvedDate.getTime())) return fail("approval timestamp is invalid; retry refused");
+        if (store.db.prepare("SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'retried' LIMIT 1").get(draft.id)) {
+          return fail("this draft has already used its one retry");
+        }
+        const originalPostKey = postLedgerKey(approvedDate.toISOString().slice(0, 10), item.source, item.externalId, item.url);
+        const postState = (store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(originalPostKey) as { state: string } | undefined)?.state;
+        if (postState !== "absent") return fail(`post status is ${postState ?? "missing"}; retry requires absent`);
+        const threadKey = threadLedgerKey(item.source, item.externalId, item.url);
+        const threadState = (store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(threadKey) as { state: string } | undefined)?.state;
+        if (threadState !== "absent") return fail(`thread status is ${threadState ?? "missing"}; retry requires absent`);
+        if (postingPaused(store)) return fail("PAUSE is active; retry refused");
+        const limitReasons = postingLimitReasons(store, draft.itemId, new Date());
+        if (limitReasons.length > 0) return fail(limitReasons.join("; "));
+        const auth = redditAuth(readSecrets().reddit);
+        if (!auth?.canPost) return fail("Reddit posting credentials are unavailable; retry was not used");
+        const result = await retryAbsentPost(store, draft.id, ctx.requesterSenderId!);
+        if (result === "posted") return ok({ sent: true, status: "posted" });
+        if (result === "uncertain") return ok({ sent: false, status: "uncertain", reason: "Reddit outcome is uncertain; reconciliation will check automatically" });
+        return ok({ sent: false, status: "failed", reason: "Reddit retry failed; no further retry is available" });
+      } finally {
+        store.close();
+      }
+    },
+  }));
+
+  api.registerTool(ctx => ({
     name: "aha_approve",
     label: "Approve an AHA draft",
     description: "Approve the pending draft for an item (AHA-n is always the item id). Owner or a member of the item's role. For Reddit, reports whether the post was confirmed, failed, or is uncertain; other sources report whether the confirmation was sent to this chat.",
@@ -903,7 +960,7 @@ export function registerAhaTools(api: {
         const postStatus = redditPost === "posted"
           ? (lang.startsWith("pt") ? "Publicado no Reddit." : "Posted on Reddit.")
           : redditPost === "uncertain"
-            ? (lang.startsWith("pt") ? "Publicação no Reddit não confirmada; confira o thread antes de tentar novamente." : "Reddit posting is unconfirmed; check the thread before trying again.")
+            ? (lang.startsWith("pt") ? "Publicação no Reddit não confirmada; vou verificar automaticamente. Aguarde o resultado antes de pedir um reenvio." : "Reddit posting is unconfirmed; I will check automatically. Wait for the result before requesting a retry.")
             : redditPost === "failed"
               ? (lang.startsWith("pt") ? "Não foi possível publicar no Reddit; a aprovação foi registrada, mas o post não foi enviado." : "Reddit posting failed; approval was recorded, but the post was not sent.")
               : undefined;
