@@ -51,7 +51,50 @@ function seedReddit(store: ReturnType<typeof openStore>, over: { externalId?: st
 const posted = {
   json: { errors: [], data: { things: [{ data: { name: "t1_posted", permalink: "/r/testaha/comments/xyz/title/posted/" } }] } },
 };
-const verified = { data: { children: [{ data: { name: "t1_posted" } }] } };
+const draftBody = "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow";
+function verifiedFor(parentId: string, body = draftBody, author = "aha") {
+  return { data: { children: [{ data: { name: "t1_posted", parent_id: parentId, body, author } }] } };
+}
+const verified = verifiedFor("t1_abc");
+
+async function runVerifyFixture(
+  t: import("node:test").TestContext,
+  fixture: unknown | Response,
+  options: { username?: string; expectedBody?: string } = {},
+) {
+  const { store, dir } = await home(t);
+  const { itemId, draft } = seedReddit(store);
+  if (options.expectedBody) {
+    const hash = createHash("sha256").update(options.expectedBody).digest("hex");
+    store.db.prepare("UPDATE drafts SET body = ?, approved_sha256 = ? WHERE id = ?").run(options.expectedBody, hash, draft.id);
+  }
+  if (options.username) {
+    writeSecrets(dir, { reddit: { clientId: "client", clientSecret: "secret", username: options.username, password: "password" } });
+  }
+  const messages: string[] = [];
+  const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/api/comment")) return Response.json(posted);
+    if (url.includes("/api/info")) return fixture instanceof Response ? fixture : Response.json(fixture);
+    if (url.includes("/messages")) {
+      messages.push(String(init?.body ?? ""));
+      return Response.json({ uid: "msg_verify" });
+    }
+    return new Response("", { status: 404 });
+  };
+  const result = await postReply(store, draft.id, {
+    auth: { token: async () => "token", invalidate() {}, canPost: true },
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    fetch,
+  });
+  return { store, itemId, draft, result, fetch, messages };
+}
+
+function verifyEvent(store: ReturnType<typeof openStore>, draftId: number) {
+  return store.db.prepare("SELECT action, detail FROM draft_events WHERE draft_id = ? ORDER BY id DESC LIMIT 1").get(draftId) as {
+    action: string; detail: string | null;
+  };
+}
 
 test("redditSubreddit reads r/name from the permalink", () => {
   assert.equal(redditSubreddit("https://www.reddit.com/r/testaha/comments/xyz/title/abc/"), "testaha");
@@ -111,6 +154,59 @@ test("postReply writes posting then posted and verifies", async t => {
   assert.equal(row.state, "verified");
 });
 
+test("verify mismatch in parent leaves ledger posted and notifies the owner once", async t => {
+  plowEnv(t);
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t3_wrong", body: draftBody, author: "aha" } }] } };
+  const { store, draft, result, fetch, messages } = await runVerifyFixture(t, fixture);
+  assert.equal(result, "posted");
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "posted");
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "parent_mismatch" });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], new RegExp(`AHA-${draft.itemId}`));
+  assert.match(messages[0], /https:\/\/www\.reddit\.com\/r\/testaha\/comments\/xyz\/title\/posted\//);
+  assert.equal(await postReply(store, draft.id, { auth: { token: async () => "token", invalidate() {}, canPost: true }, fetch }), "posted");
+  assert.equal(messages.length, 1);
+});
+
+test("verify detects a body mismatch", async t => {
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: "different text", author: "aha" } }] } };
+  const { store, draft, result } = await runVerifyFixture(t, fixture);
+  assert.equal(result, "posted");
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "body_mismatch" });
+});
+
+test("verify normalizes Reddit HTML escapes, line endings, and trailing spaces", async t => {
+  const expected = "A & B < C > D\r\n— AHA, AI assistant of Plow";
+  const redditBody = "A &amp; B &lt; C &gt; D\n— AHA, AI assistant of Plow   ";
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: redditBody, author: "aha" } }] } };
+  const { store, draft, result } = await runVerifyFixture(t, fixture, { expectedBody: expected, username: "aha" });
+  assert.equal(result, "posted");
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verified", detail: null });
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "verified");
+});
+
+test("verify detects an author mismatch when Reddit credentials identify the account", async t => {
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: draftBody, author: "someone-else" } }] } };
+  const { store, draft } = await runVerifyFixture(t, fixture, { username: "aha" });
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "author_mismatch" });
+});
+
+test("verify reports a reliably removed comment and notifies the owner", async t => {
+  plowEnv(t);
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: "[removed]", author: "aha" } }] } };
+  const { store, draft, messages } = await runVerifyFixture(t, fixture);
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "removed" });
+  assert.equal(messages.length, 1);
+});
+
+test("verify read failure records unavailable and does not notify", async t => {
+  plowEnv(t);
+  const { store, draft, messages } = await runVerifyFixture(t, new Response("unavailable", { status: 503 }));
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_unavailable", detail: "verify_unavailable" });
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "posted");
+  assert.equal(messages.length, 0);
+});
+
 test("a second draft on the same thread is refused without a posted event", async t => {
   const { store } = await home(t);
   const first = seedReddit(store, { externalId: "t1_first" });
@@ -121,7 +217,7 @@ test("a second draft on the same thread is refused without a posted event", asyn
       comments += 1;
       return Response.json(posted);
     }
-    return Response.json(verified);
+    return Response.json(verifiedFor("t1_first"));
   };
   assert.equal(await postReply(store, first.draft.id, { token: "reddit_user_token", now: () => new Date("2026-09-23T12:00:00.000Z"), fetch }), "posted");
   assert.equal(await postReply(store, second.draft.id, { token: "reddit_user_token", now: () => new Date("2026-09-23T12:00:00.000Z"), fetch }), "failed");
@@ -271,7 +367,7 @@ test("L2 auto-post runs checkPolicy and will not send a 4th subreddit reply", as
     fetch: async (input) => {
       if (String(input).includes("/api/comment")) comments += 1;
       if (String(input).includes("/api/comment")) return Response.json(posted);
-      if (String(input).includes("/api/info")) return Response.json(verified);
+      if (String(input).includes("/api/info")) return Response.json(verifiedFor("t1_auto"));
       return Response.json({ uid: "msg" });
     },
   });
@@ -294,7 +390,7 @@ test("L2 automatic publication records drafted, auto_approved, posted, and verif
     complete: async () => ({ ok: true, value: { body: "Thanks for asking about Plow queues." } }),
     fetch: async input => {
       if (String(input).includes("/api/comment")) return Response.json(posted);
-      if (String(input).includes("/api/info")) return Response.json(verified);
+      if (String(input).includes("/api/info")) return Response.json(verifiedFor("t1_auto"));
       return Response.json({ uid: "msg" });
     },
   });

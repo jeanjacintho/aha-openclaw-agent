@@ -44,7 +44,9 @@ async function home(
       if (redditOutcome === "posted") return Response.json({ json: { data: { things: [{ data: { name: "t1_reply", permalink: "/r/test/comments/thread/reply" } }] } } });
       if (redditOutcome === "uncertain") return new Response("gateway error", { status: 500 });
     }
-    if (url.includes("oauth.reddit.com/api/info")) return Response.json({ data: { children: [{ data: { name: "t1_reply" } }] } });
+    if (url.includes("oauth.reddit.com/api/info")) return Response.json({ data: { children: [{
+      data: { name: "t1_reply", parent_id: "t3_thread", body: "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow", author: "aha" },
+    }] } });
     if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
       const body = String(init?.body ?? "");
       posts.push({ url, body });
