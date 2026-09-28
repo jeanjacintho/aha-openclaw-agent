@@ -11,6 +11,7 @@ import { runBackfill } from "../aha/pipeline/backfill.ts";
 import { openStore } from "../aha/store/db.ts";
 import { RETENTION_DAYS, ForgetError, forgetByUrlOrAuthor, pruneExpired } from "../aha/store/retention.ts";
 import { checkPolicy } from "../aha/responder/policy.ts";
+import { recordDraftEvent } from "../aha/responder/draft-events.ts";
 import { recordUsage } from "../aha/usage/ledger.ts";
 import { classifyAllowed, DEFAULT_DAILY_TOKEN_BUDGET, llmAllowed } from "../aha/usage/budget.ts";
 import entry from "../plugin/index.ts";
@@ -214,6 +215,8 @@ test("forget and retention remove the Reddit thread ledger key linked by permali
     source: "reddit", externalId: "t1_expired", url: "https://www.reddit.com/r/plow/comments/xyz/title/expired/",
     fetched: "2026-06-01T00:00:00.000Z",
   });
+  recordDraftEvent(store, { draftId: 301, itemId: forgottenId, actor: "system", action: "posted", body: "private draft text" });
+  recordDraftEvent(store, { draftId: 302, itemId: expiredId, actor: "system", action: "verified", body: "expired draft text" });
   store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', ?)").run(
     "post:2026-09-23:reddit:plow:t1_forget", "https://www.reddit.com/r/plow/comments/abc/title/forget/",
   );
@@ -228,12 +231,14 @@ test("forget and retention remove the Reddit thread ledger key linked by permali
   );
 
   assert.equal(forgetByUrlOrAuthor(store, "https://www.reddit.com/r/plow/comments/abc/title/forget/"), 1);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE item_id = ?").get(forgottenId) as { n: number }).n, 0);
   assert.equal(store.db.prepare("SELECT key FROM ledger WHERE key IN ('post:2026-09-23:reddit:plow:t1_forget', 'thread:reddit:t3_abc')").all().length, 0);
   assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(expiredId));
 
   const pruned = pruneExpired(store, new Date("2026-09-23T00:00:00.000Z"));
   assert.equal(pruned.processed, 1);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(expiredId), undefined);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE item_id = ?").get(expiredId) as { n: number }).n, 0);
   assert.equal(store.db.prepare("SELECT key FROM ledger WHERE key IN ('post:2026-06-01:reddit:plow:t1_expired', 'thread:reddit:t3_xyz')").all().length, 0);
   assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(forgottenId), undefined);
 });

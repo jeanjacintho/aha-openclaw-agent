@@ -8,7 +8,7 @@ import { getConfig, saveConfig } from "../aha/config.ts";
 import { readSecrets, writeSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
 
-const TABLES = ["authors", "autonomy", "classifications", "config", "deliveries", "drafts", "feedback_examples", "flags", "forget_audit", "items", "ledger", "meta", "people_roles", "promise_proposals", "promises", "setup_draft", "sites", "source_runs", "topic_weekly", "topics"];
+const TABLES = ["authors", "autonomy", "classifications", "config", "deliveries", "draft_events", "drafts", "feedback_examples", "flags", "forget_audit", "items", "ledger", "meta", "people_roles", "promise_proposals", "promises", "setup_draft", "sites", "source_runs", "topic_weekly", "topics"];
 const STORE = new URL("../aha/store/db.ts", import.meta.url).href;
 
 async function home(t: import("node:test").TestContext) {
@@ -43,7 +43,7 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.deepEqual(tables(first), TABLES);
   assert.deepEqual(columns(first, "source_runs"), ["id", "source", "window_start", "window_end", "status", "detail"]);
   assert.deepEqual(columns(first, "deliveries"), ["key", "chat_uid", "status", "message_uid", "created_at", "updated_at", "body"]);
-  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 16);
+  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'forget_audit_target_hash_idx'").get() as { name: string }).name, "forget_audit_target_hash_idx");
   assert.equal(columns(first, "drafts").includes("edited"), true);
   assert.equal(columns(first, "items").includes("assignee"), true);
@@ -56,6 +56,8 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.equal(columns(first, "drafts").includes("approved_sha256"), true);
   assert.equal(columns(first, "drafts").includes("approved_at"), true);
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'drafts_one_active_per_item_idx'").get() as { name: string }).name, "drafts_one_active_per_item_idx");
+  assert.deepEqual(columns(first, "draft_events"), ["id", "draft_id", "item_id", "at", "actor", "action", "body_sha256", "detail"]);
+  assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'draft_events_item_id_idx'").get() as { name: string }).name, "draft_events_item_id_idx");
   first.db.prepare("INSERT INTO items (source, external_id) VALUES (?, ?)").run("hn", "1");
   assert.equal((first.db.prepare("SELECT origin FROM items WHERE external_id = '1'").get() as { origin: string }).origin, "live");
   assert.equal((first.db.prepare("SELECT classify_transport_attempts FROM items WHERE external_id = '1'").get() as { classify_transport_attempts: number }).classify_transport_attempts, 0);
@@ -81,7 +83,7 @@ test("migration adds origin to an existing database and defaults old rows to liv
 
   const migrated = openStore(dir);
   t.after(() => migrated.close());
-  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 16);
+  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
   assert.equal((migrated.db.prepare("SELECT origin FROM items WHERE external_id = 'old-row'").get() as { origin: string }).origin, "live");
   assert.equal((migrated.db.prepare("SELECT body FROM deliveries WHERE key = 'old-delivery'").get() as { body: string | null }).body, null);
   assert.equal((migrated.db.prepare("SELECT body FROM drafts WHERE item_id = (SELECT id FROM items WHERE external_id = 'old-row') AND state = 'pending'").get() as { body: string }).body, "newer draft");
@@ -157,7 +159,7 @@ test("two processes can open a new database at the same time", async t => {
     for (const result of results) assert.equal(result.status, 0, result.stderr);
     const store = openStore(dir);
     t.after(() => store.close());
-    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 16);
+    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
     assert.deepEqual(tables(store), TABLES);
   }
 });

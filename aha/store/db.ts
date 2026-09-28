@@ -8,7 +8,7 @@ export type Store = {
   close(): void;
 };
 
-const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql", "006_draft_edited.sql", "007_forget_audit.sql", "008_classify_attempts.sql", "009_setup_draft.sql", "010_sites.sql", "011_item_origin.sql", "012_delivery_body.sql", "013_classify_transport_attempts.sql", "014_forget_audit_target_hash_index.sql", "015_classify_draft_claims.sql", "016_approved_draft_content.sql"];
+const FILES = ["001_init.sql", "002_item_assignee.sql", "003_draft_attempts.sql", "004_promise_proposals.sql", "005_autonomy_suggested.sql", "006_draft_edited.sql", "007_forget_audit.sql", "008_classify_attempts.sql", "009_setup_draft.sql", "010_sites.sql", "011_item_origin.sql", "012_delivery_body.sql", "013_classify_transport_attempts.sql", "014_forget_audit_target_hash_index.sql", "015_classify_draft_claims.sql", "016_approved_draft_content.sql", "017_draft_events.sql"];
 const BUSY_MS = 5000;
 
 function defaultMigrations() {

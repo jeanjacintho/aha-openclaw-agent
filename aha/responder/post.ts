@@ -7,6 +7,7 @@ import { REDDIT_USER_AGENT, withRedditToken } from "../sources/reddit.ts";
 import { RedditAuthError, redditAuth, type RedditAuth } from "../sources/reddit-auth.ts";
 import { withHttpTimeout } from "../sources/http.ts";
 import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
+import { recordDraftEvent, type DraftEventAction, type DraftEventDetail } from "./draft-events.ts";
 
 export { redditSubreddit, redditThreadId, threadLedgerKey, postLedgerKey } from "./reddit-url.ts";
 
@@ -59,13 +60,9 @@ function freezePosting(store: Store, key: string, url: string | null) {
   store.db.prepare("UPDATE ledger SET state = 'uncertain', url = ? WHERE key = ? AND state = 'posting'").run(url, key);
 }
 
-function haltFrom(state: string | undefined): PostResult | undefined {
-  if (!state) return;
-  if (state === "uncertain" || state === "posting") return "uncertain";
-  if (state === "posted" || state === "verified") return "posted";
-}
+type PostClaimResult = PostResult | "owned" | "already_posted" | "thread_taken";
 
-function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostResult | "owned" {
+function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostClaimResult {
   return store.tx(() => {
     const post = ledgerState(store, postKey);
     const thread = ledgerState(store, threadKey);
@@ -74,14 +71,19 @@ function claimKeys(store: Store, postKey: string, threadKey: string, url: string
       freezePosting(store, threadKey, url);
       return "uncertain";
     }
-    const halt = haltFrom(post?.state) ?? haltFrom(thread?.state);
-    if (halt) return halt;
+    if (post?.state === "posted" || post?.state === "verified") return "already_posted";
+    if (thread?.state === "posted" || thread?.state === "verified") return "thread_taken";
+    if (post?.state === "uncertain" || thread?.state === "uncertain") return "uncertain";
     const threadReadyForeign = thread?.state === "ready" && post?.state !== "ready" && post?.state !== "failed";
-    if (threadReadyForeign) return "posted";
+    if (threadReadyForeign) return "thread_taken";
     if (!takeKey(store, postKey, url) || !takeKey(store, threadKey, url)) {
       freezePosting(store, postKey, url);
       freezePosting(store, threadKey, url);
-      return haltFrom(ledgerState(store, postKey)?.state) ?? haltFrom(ledgerState(store, threadKey)?.state) ?? "uncertain";
+      const currentPost = ledgerState(store, postKey)?.state;
+      const currentThread = ledgerState(store, threadKey)?.state;
+      if (currentPost === "posted" || currentPost === "verified") return "already_posted";
+      if (currentThread === "posted" || currentThread === "verified") return "thread_taken";
+      return "uncertain";
     }
     return "owned";
   });
@@ -133,11 +135,19 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   const draft = store.db.prepare(`SELECT id, item_id AS itemId, body, state,
       approved_sha256 AS approvedSha256, approved_at AS approvedAt FROM drafts WHERE id = ?`).get(draftId) as Draft | undefined;
   if (!draft) return "failed";
+  const event = (action: DraftEventAction, detail?: DraftEventDetail) =>
+    recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: "system", action, body: draft.body, detail, at: deps.now?.() });
   const item = store.db.prepare("SELECT source, external_id AS externalId, url FROM items WHERE id = ?").get(draft.itemId) as {
     source: string; externalId: string; url: string | null;
   } | undefined;
-  if (!item) return "failed";
-  if (item.source !== "reddit") return "failed";
+  if (!item) {
+    event("failed", "item_missing");
+    return "failed";
+  }
+  if (item.source !== "reddit") {
+    event("failed", "unsupported_source");
+    return "failed";
+  }
   const now = deps.now?.() ?? new Date();
   const approvedAt = draft.approvedAt ? new Date(draft.approvedAt) : undefined;
   const reservationDay = approvedAt && Number.isFinite(approvedAt.getTime()) ? approvedAt : now;
@@ -148,15 +158,26 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     && createHash("sha256").update(draft.body).digest("hex") === draft.approvedSha256;
   if (draft.state !== "approved" || !approvedHashMatches) {
     releaseReadyReservation(store, key, thread, item.url);
+    event("post_refused", draft.state !== "approved" ? "not_approved" : "hash_mismatch");
     return "failed";
   }
   if (paused(store)) {
     releaseReadyReservation(store, key, thread, item.url);
+    event("post_refused", "paused");
     return "failed";
   }
   const claimed = claimKeys(store, key, thread, item.url);
   if (claimed !== "owned") {
     if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    if (claimed === "already_posted") {
+      event("post_refused", "already_posted");
+      return "posted";
+    }
+    if (claimed === "thread_taken") {
+      event("post_refused", "thread_taken");
+      return "failed";
+    }
+    event(claimed === "uncertain" ? "uncertain" : "failed");
     return claimed;
   }
   const http = deps.fetch ?? fetch;
@@ -164,6 +185,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   // Posting needs a token for the account: an app-only token can only search.
   if (!auth?.canPost) {
     finish(store, key, thread, "failed", item.url);
+    event("failed", "cannot_post");
     return "failed";
   }
   const body = new URLSearchParams({ api_type: "json", thing_id: item.externalId, text: draft.body }).toString();
@@ -179,19 +201,23 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   } catch (error) {
     if (error instanceof RedditAuthError) {
       finish(store, key, thread, "failed", item.url);
+      event("failed", "auth_error");
       return "failed";
     }
     finish(store, key, thread, "uncertain", item.url);
+    event("uncertain", "network_error");
     await notifyUncertain(store, draft.itemId, key, deps);
     return "uncertain";
   }
   if (response.status === 401 || response.status === 403) {
     finish(store, key, thread, "failed", item.url);
+    event("failed", `http_${response.status}`);
     return "failed";
   }
   if (!response.ok) {
     const next = response.status >= 500 ? "uncertain" : "failed";
     finish(store, key, thread, next, item.url);
+    event(next, `http_${response.status}`);
     if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
     return next;
   }
@@ -200,20 +226,24 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     parsed = commentId(await response.json());
   } catch {
     finish(store, key, thread, "uncertain", item.url);
+    event("uncertain", "response_invalid");
     await notifyUncertain(store, draft.itemId, key, deps);
     return "uncertain";
   }
   if (!parsed) {
     finish(store, key, thread, "failed", item.url);
+    event("failed", "response_invalid");
     return "failed";
   }
   const postedUrl = parsed.permalink
     ? (parsed.permalink.startsWith("http") ? parsed.permalink : `https://www.reddit.com${parsed.permalink}`)
     : item.url;
   finish(store, key, thread, "posted", postedUrl);
+  event("posted");
   try {
     if (await verify(http, await auth.token(), parsed.id)) {
       finish(store, key, thread, "verified", postedUrl);
+      event("verified");
     }
   } catch {
     /* posted stands if the re-read fails */

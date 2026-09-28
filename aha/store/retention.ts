@@ -64,6 +64,7 @@ export function parseForgetNeedle(raw: string): { kind: "url"; url: string } | {
 
 function deleteItems(store: Store, ids: number[]) {
   for (const id of ids) {
+    store.db.prepare("DELETE FROM draft_events WHERE item_id = ?").run(id);
     store.db.prepare("DELETE FROM drafts WHERE item_id = ?").run(id);
     store.db.prepare("DELETE FROM feedback_examples WHERE item_id = ?").run(id);
     store.db.prepare("DELETE FROM classifications WHERE item_id = ?").run(id);

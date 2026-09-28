@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -43,6 +44,7 @@ async function home(
       if (redditOutcome === "posted") return Response.json({ json: { data: { things: [{ data: { name: "t1_reply", permalink: "/r/test/comments/thread/reply" } }] } } });
       if (redditOutcome === "uncertain") return new Response("gateway error", { status: 500 });
     }
+    if (url.includes("oauth.reddit.com/api/info")) return Response.json({ data: { children: [{ data: { name: "t1_reply" } }] } });
     if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
       const body = String(init?.body ?? "");
       posts.push({ url, body });
@@ -140,20 +142,22 @@ test("aha_not_us records a negative example used by classify", async t => {
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(itemId) as { state: string }).state, "irrelevant");
 });
 
-test("aha_logs returns the item history without the public post body", async t => {
+test("aha_logs returns draft events without draft or post bodies", async t => {
   const dir = await home(t);
   const { itemId } = seed(dir);
   const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
   await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
   const result = await owner.get("aha_logs")!.execute("call", { id: `AHA-${itemId}` });
   assert.equal(result.isError ?? false, false);
-  const details = result.details as { publicId: string; item: { id: number; body?: string }; drafts: { id: number; chars?: number; body?: string }[]; classification: { topic?: string } };
+  const details = result.details as { publicId: string; item: { id: number; body?: string }; drafts: { id: number; chars?: number; body?: string }[]; draftEvents: { action: string; body_sha256: string | null }[]; classification: { topic?: string } };
   assert.equal(details.publicId, `AHA-${itemId}`);
   assert.equal(details.item.id, itemId);
   assert.equal("body" in details.item, false);
   assert.equal("topic" in (details.classification ?? {}), false);
   assert.equal("body" in details.drafts[0], false);
   assert.equal(typeof details.drafts[0].chars, "number");
+  assert.deepEqual(details.draftEvents.map(event => event.action), ["approved"]);
+  assert.match(details.draftEvents[0].body_sha256 ?? "", /^[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(result.details).includes("Does plow queue jobs?"), false);
   assert.equal(JSON.stringify(result.details).includes("Thanks for asking"), false);
 });
@@ -217,6 +221,64 @@ test("aha_edit refuses an already approved draft", async t => {
   assert.equal((store.db.prepare("SELECT body FROM drafts WHERE id = ?").get(draftId) as { body: string }).body, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
 });
 
+test("aha_edit records the hash of the edited body", async t => {
+  const dir = await home(t);
+  const { itemId } = seed(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-editor", nativeChannelId: "cht_dm" });
+  const editedBody = "Thanks for asking about queues. — AHA, AI assistant of Plow";
+  const result = await owner.get("aha_edit")!.execute("edit", { draftId: `AHA-${itemId}`, text: editedBody });
+  assert.equal(result.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const event = store.db.prepare("SELECT actor, action, body_sha256, detail FROM draft_events WHERE item_id = ?").get(itemId) as {
+    actor: string; action: string; body_sha256: string; detail: string | null;
+  };
+  assert.deepEqual({ ...event }, { actor: "plow-editor", action: "edited", body_sha256: createHash("sha256").update(editedBody).digest("hex"), detail: null });
+  assert.equal(JSON.stringify(event).includes(editedBody), false);
+});
+
+test("aha_ignore records the actor but never the free-text reason", async t => {
+  const dir = await home(t);
+  const { itemId } = seed(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-reviewer", nativeChannelId: "cht_dm" });
+  const reason = "contains private text evil.example/secret";
+  const result = await owner.get("aha_ignore")!.execute("ignore", { draftId: `AHA-${itemId}`, reason });
+  assert.equal(result.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const event = store.db.prepare("SELECT actor, action, body_sha256, detail FROM draft_events WHERE item_id = ?").get(itemId) as {
+    actor: string; action: string; body_sha256: string; detail: string | null;
+  };
+  assert.equal(event.actor, "plow-reviewer");
+  assert.equal(event.action, "ignored");
+  assert.equal(event.body_sha256?.length, 64);
+  assert.equal(event.detail, null);
+  assert.equal(JSON.stringify(event).includes(reason), false);
+});
+
+test("approval, edit, and ignore roll back when their audit event cannot be written", async t => {
+  const dir = await home(t);
+  const { itemId, draftId } = seed(dir);
+  const store = openStore(dir);
+  store.db.exec(`CREATE TRIGGER fail_draft_audit BEFORE INSERT ON draft_events
+    WHEN NEW.action IN ('approved', 'edited', 'ignored')
+    BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`);
+  store.close();
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await assert.rejects(() => owner.get("aha_approve")!.execute("approve", { draftId: `AHA-${itemId}` }), /audit unavailable/);
+  await assert.rejects(() => owner.get("aha_edit")!.execute("edit", {
+    draftId: `AHA-${itemId}`, text: "A changed answer. — AHA, AI assistant of Plow",
+  }), /audit unavailable/);
+  await assert.rejects(() => owner.get("aha_ignore")!.execute("ignore", { draftId: `AHA-${itemId}`, reason: "not needed" }), /audit unavailable/);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  const draft = after.db.prepare("SELECT state, body FROM drafts WHERE id = ?").get(draftId) as { state: string; body: string };
+  assert.equal(draft.state, "pending");
+  assert.equal(draft.body, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+  assert.equal((after.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE state = 'ready'").get() as { n: number }).n, 0);
+  assert.equal((after.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE item_id = ?").get(itemId) as { n: number }).n, 0);
+});
+
 test("Reddit approval reports a confirmed post as sent", async t => {
   const posts: { url: string; body: string }[] = [];
   const dir = await home(t, posts, "posted");
@@ -229,6 +291,12 @@ test("Reddit approval reports a confirmed post as sent", async t => {
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT state FROM drafts WHERE id = ?").get(draftId) as { state: string }).state, "approved");
+  const events = store.db.prepare("SELECT action, actor FROM draft_events WHERE item_id = ? ORDER BY id").all(itemId) as { action: string; actor: string }[];
+  assert.deepEqual(events.map(event => ({ ...event })), [
+    { action: "approved", actor: "plow-owner" },
+    { action: "posted", actor: "system" },
+    { action: "verified", actor: "system" },
+  ]);
 });
 
 test("Reddit approval reports an uncertain post without claiming success", async t => {
