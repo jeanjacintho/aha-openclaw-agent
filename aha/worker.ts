@@ -14,16 +14,31 @@ import { pruneExpired } from "./store/retention.ts";
 
 export { ahaHome };
 
+export type WorkerStage = { name: string; run: () => unknown | Promise<unknown> };
+
+export async function runWorkerStages(stages: WorkerStage[]) {
+  for (const stage of stages) {
+    try {
+      await stage.run();
+    } catch (error) {
+      console.error(`aha: worker stage ${stage.name} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
 async function ingestThenClassify() {
   const store = openStore();
   try {
-    await runIngest(store, watchAdapters(getConfig(store)), new Date());
-    const pruned = pruneExpired(store, new Date());
-    await notifyExpiredDrafts(store, pruned.expiredItemIds);
-    await classifyNewItems(store);
-    await draftAndNotify(store);
-    await runPromiseChecks(store, new Date());
-    await retryUncertainDeliveries(store);
+    let expiredItemIds: number[] | undefined;
+    await runWorkerStages([
+      { name: "ingest", run: () => runIngest(store, watchAdapters(getConfig(store)), new Date()) },
+      { name: "retention", run: () => { expiredItemIds = pruneExpired(store, new Date()).expiredItemIds; } },
+      { name: "expired-draft notifications", run: () => expiredItemIds === undefined ? undefined : notifyExpiredDrafts(store, expiredItemIds) },
+      { name: "classification", run: () => classifyNewItems(store) },
+      { name: "draft notifications", run: () => draftAndNotify(store) },
+      { name: "promise checks", run: () => runPromiseChecks(store, new Date()) },
+      { name: "notification retries", run: () => retryUncertainDeliveries(store) },
+    ]);
   } finally {
     store.close();
   }
