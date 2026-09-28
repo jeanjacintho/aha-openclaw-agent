@@ -7,7 +7,11 @@ export type SendDeps = {
   fetch?: typeof fetch;
   store?: Store;
   now?: () => Date;
+  timeoutMs?: number;
 };
+
+export const DELIVERY_RETRY_GRACE_MS = 5 * 60 * 1000;
+export const DELIVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function apiBase() {
   const base = process.env.PLOW_API_BASE?.replace(/\/$/, "");
@@ -34,18 +38,27 @@ function lookup(store: Store, key: string) {
   return store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(key) as { status: string } | undefined;
 }
 
-function claim(store: Store, key: string, chatUid: string, at: string) {
-  const inserted = store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at)
-    VALUES (?, ?, 'uncertain', NULL, ?, ?) ON CONFLICT (key) DO NOTHING`).run(key, chatUid, at, at);
+function claim(store: Store, key: string, chatUid: string, text: string, at: string) {
+  const inserted = store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at, body)
+    VALUES (?, ?, 'uncertain', NULL, ?, ?, ?) ON CONFLICT (key) DO NOTHING`).run(key, chatUid, at, at, text);
   if (inserted.changes === 1) return "owned";
-  const retried = store.db.prepare(`UPDATE deliveries SET status = 'uncertain', chat_uid = ?, updated_at = ?
-    WHERE key = ? AND status = 'failed'`).run(chatUid, at, key);
+  const retried = store.db.prepare(`UPDATE deliveries SET status = 'uncertain', chat_uid = ?, body = ?, updated_at = ?
+    WHERE key = ? AND status = 'failed'`).run(chatUid, text, at, key);
   if (retried.changes === 1) return "owned";
+  const expireBefore = new Date(Date.parse(at) - DELIVERY_MAX_AGE_MS).toISOString();
+  const expired = store.db.prepare(`UPDATE deliveries SET status = 'failed', body = NULL, updated_at = ?
+    WHERE key = ? AND status = 'uncertain' AND created_at <= ?`).run(at, key, expireBefore);
+  if (expired.changes === 1) return "failed";
+  const retryBefore = new Date(Date.parse(at) - DELIVERY_RETRY_GRACE_MS).toISOString();
+  const reclaimed = store.db.prepare(`UPDATE deliveries SET status = 'uncertain', chat_uid = ?, body = ?, updated_at = ?
+    WHERE key = ? AND status = 'uncertain' AND updated_at <= ?`).run(chatUid, text, at, key, retryBefore);
+  if (reclaimed.changes === 1) return "owned";
   return lookup(store, key)?.status ?? "uncertain";
 }
 
 function finish(store: Store, key: string, status: "sent" | "failed" | "uncertain", messageUid: string | null, at: string) {
-  store.db.prepare("UPDATE deliveries SET status = ?, message_uid = ?, updated_at = ? WHERE key = ?").run(status, messageUid, at, key);
+  store.db.prepare("UPDATE deliveries SET status = ?, message_uid = ?, updated_at = ?, body = CASE WHEN ? = 'uncertain' THEN body ELSE NULL END WHERE key = ?")
+    .run(status, messageUid, at, status, key);
 }
 
 function uncertainStatus(status: number) {
@@ -59,7 +72,7 @@ export async function sendToChat(chatUid: string, text: string, key: string, dep
     const http = deps.fetch ?? fetch;
     if (paused(store) && chatUid !== ownerChatUid(store)) return "failed";
     const at = (deps.now ?? (() => new Date()))().toISOString();
-    const claimed = claim(store, key, chatUid, at);
+    const claimed = claim(store, key, chatUid, text, at);
     if (claimed !== "owned") {
       if (claimed === "sent") return "duplicate";
       return claimed as SendResult;
@@ -70,23 +83,65 @@ export async function sendToChat(chatUid: string, text: string, key: string, dep
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ body: text, attachment_uids: [] }),
+        signal: AbortSignal.timeout(deps.timeoutMs ?? 10_000),
       });
     } catch {
+      finish(store, key, "uncertain", null, (deps.now ?? (() => new Date()))().toISOString());
       return "uncertain";
     }
     if (response.ok) {
+      let messageUid: string | null = null;
       try {
         const payload = await response.json() as { uid?: string };
-        finish(store, key, "sent", payload.uid ?? null, at);
-        return "sent";
+        messageUid = payload.uid ?? null;
       } catch {
-        return "uncertain";
+        // A 2xx response means Plow accepted the message; malformed JSON must not trigger a duplicate retry.
       }
+      finish(store, key, "sent", messageUid, at);
+      return "sent";
     }
-    if (uncertainStatus(response.status)) return "uncertain";
+    if (uncertainStatus(response.status)) {
+      finish(store, key, "uncertain", null, (deps.now ?? (() => new Date()))().toISOString());
+      return "uncertain";
+    }
     finish(store, key, "failed", null, at);
     return "failed";
   } finally {
     if (owned) store.close();
   }
+}
+
+export async function retryUncertainDeliveries(
+  store: Store,
+  now = new Date(),
+  deps: Pick<SendDeps, "fetch" | "timeoutMs"> = {},
+) {
+  const retryBefore = new Date(now.getTime() - DELIVERY_RETRY_GRACE_MS).toISOString();
+  const expireBefore = new Date(now.getTime() - DELIVERY_MAX_AGE_MS).toISOString();
+  const expired = store.db.prepare(`UPDATE deliveries SET status = 'failed', body = NULL, updated_at = ?
+    WHERE status = 'uncertain' AND created_at <= ?`).run(now.toISOString(), expireBefore).changes;
+  if (expired > 0) {
+    console.error(`aha: ${expired} uncertain notification(s) discarded after 24 hours without delivery`);
+  }
+  const rows = store.db.prepare(`SELECT key, chat_uid AS chatUid, body FROM deliveries
+    WHERE status = 'uncertain' AND body IS NOT NULL AND created_at > ? AND updated_at <= ? ORDER BY updated_at, key`).all(expireBefore, retryBefore) as {
+    key: string; chatUid: string; body: string;
+  }[];
+  const unrecoverable = store.db.prepare(`UPDATE deliveries SET status = 'failed', updated_at = ?
+    WHERE status = 'uncertain' AND body IS NULL AND updated_at <= ?`).run(now.toISOString(), retryBefore).changes;
+  if (unrecoverable > 0) {
+    console.error(`aha: ${unrecoverable} old uncertain notification(s) could not be retried because their message text was not stored`);
+  }
+  // Retries favor eventual delivery when no server-side idempotency key is available; a timed-out or 5xx POST may therefore occasionally duplicate a message that Plow already accepted.
+  for (const row of rows) {
+    try {
+      const result = await sendToChat(row.chatUid, row.body, row.key, { store, fetch: deps.fetch, timeoutMs: deps.timeoutMs, now: () => now });
+      if (result !== "sent" && result !== "duplicate") {
+        console.error(`aha: notification ${row.key} retry was not delivered (${result})`);
+      }
+    } catch (error) {
+      console.error(`aha: notification ${row.key} retry failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return rows.length;
 }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { startAha } from "../aha/worker.ts";
+import { logDigestDelivery, startAha } from "../aha/worker.ts";
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -37,4 +37,11 @@ test("a failure inside the worker does not propagate", async t => {
   assert.equal(startAha(), undefined);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /^aha: worker standing down: /);
+});
+
+test("digest delivery failures are logged", t => {
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => { errors.push(String(line)); });
+  logDigestDelivery("uncertain", new Date("2026-09-23T12:00:00.000Z"));
+  assert.deepEqual(errors, ["aha: digest 2026-09-23 was not delivered (uncertain)"]);
 });
