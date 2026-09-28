@@ -35,6 +35,11 @@ That mints `./plow-credentials` (gitignored), builds the image, and starts the
 `agent` service. Compose fails immediately if that credential file is missing.
 Text the selected number as the owner and check that a reply arrives.
 
+Compose binds the dashboard to `127.0.0.1:3001` by default. To use a different
+host port when `3001` is already occupied, set `HOST_PORT` for the deploy or
+Compose command (for example, `HOST_PORT=3002 docker compose up --build -d`).
+The container continues to listen on port `3001` internally.
+
 `docker compose down` keeps the named state volume. `docker compose down -v`
 deletes it, so the next boot starts with fresh agent state. When finished:
 
