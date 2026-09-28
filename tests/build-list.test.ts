@@ -29,3 +29,10 @@ test("build.ts compiles every module boot/main.ts and plugin/index.ts import", a
   assert.ok(seen.has("plugin/setup-gate"));
   for (const name of seen) assert.ok(list.includes(name), `build.ts does not emit ${name}.js`);
 });
+
+test("boot starts the gateway before the AHA worker", async () => {
+  const main = await read("boot/main.ts");
+  const gateway = main.indexOf("await startGateway(");
+  const worker = main.indexOf("startAha();");
+  assert.ok(gateway >= 0 && worker >= 0 && gateway < worker);
+});

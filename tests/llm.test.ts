@@ -105,6 +105,7 @@ test("a GPT-6 Luna timeout is ok:false without retrying another model", async t 
   });
   assert.equal(result.ok, false);
   if (result.ok) return;
+  assert.equal(result.kind, "transport");
   assert.match(result.reason, /timeout/i);
   assert.deepEqual(models, ["openai/gpt-6-luna"]);
   assert.equal(listUsage().length, 0);
@@ -121,9 +122,34 @@ test("a GPT-6 Luna request error is ok:false without a fallback", async t => {
       return new Response("nope", { status: 503 });
     },
   });
-  assert.deepEqual(result, { ok: false, reason: "http 503" });
+  assert.deepEqual(result, { ok: false, reason: "http 503", kind: "transport" });
   assert.deepEqual(models, ["openai/gpt-6-luna"]);
   assert.equal(listUsage().length, 0);
+});
+
+for (const status of [400, 401, 403, 413, 422]) test(`HTTP ${status} is a content failure`, async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  const result = await complete(req(), { fetch: async () => new Response("rejected", { status }) });
+  assert.deepEqual(result, { ok: false, reason: `http ${status}`, kind: "content" });
+});
+
+for (const status of [408, 425, 429]) test(`HTTP ${status} is a transport failure`, async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  const result = await complete(req(), { fetch: async () => new Response("try again", { status }) });
+  assert.deepEqual(result, { ok: false, reason: `http ${status}`, kind: "transport" });
+});
+
+test("a successful HTTP response with invalid API JSON is a content failure", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-llm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
+  const result = await complete(req(), { fetch: async () => new Response("not-json", { status: 200 }) });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.kind, "content");
 });
 
 test("extractJson recovers the reply shapes seen from the Plow gateway", () => {
@@ -152,7 +178,7 @@ test("an unparseable reply is kept on disk for inspection", async t => {
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   env(t, { AHA_HOME: home, PLOW_API_BASE: "http://llm.test", PLOW_AGENT_TOKEN: "tok" });
   const result = await complete(req(), { fetch: async () => reply("sorry, no json today") });
-  assert.deepEqual(result, { ok: false, reason: "invalid json" });
+  assert.deepEqual(result, { ok: false, reason: "invalid json", kind: "content" });
   const kept = await fs.readFile(path.join(home, "llm-invalid-last.txt"), "utf8");
   assert.match(kept, /classify openai\/gpt-6-luna\nsorry, no json today$/);
 });
