@@ -26,6 +26,7 @@ test("the same key is delivered once", async t => {
   const store = await home(t);
   const posts: string[] = [];
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+    assert.ok(init?.signal instanceof AbortSignal);
     const url = String(input);
     if (init?.method === "POST") posts.push(url);
     return new Response(JSON.stringify({ uid: "msg_1" }), { status: 200 });

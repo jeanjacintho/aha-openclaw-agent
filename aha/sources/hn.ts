@@ -1,5 +1,5 @@
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
-import { retryAfterMs } from "./http.ts";
+import { retryAfterMs, withHttpTimeout } from "./http.ts";
 
 const HOST = "https://hn.algolia.com/api/v1/search_by_date";
 
@@ -120,7 +120,7 @@ export function hnSource(http: typeof fetch = fetch): SourceAdapter {
       // required words "a", "OR", "b". Each term gets its own request instead.
       const url = `${HOST}?query=${encodeURIComponent(term)}&numericFilters=${encodeURIComponent(`created_at_i>${since},created_at_i<${until}`)}&hitsPerPage=50&page=${page}&typoTolerance=false`;
       try {
-        return await read(await http(url), boundedIndex, terms.length, page);
+        return await read(await http(url, withHttpTimeout()), boundedIndex, terms.length, page);
       } catch {
         return { ok: false, error: "network" };
       }

@@ -15,7 +15,8 @@ const query: SourceQuery = {
 
 test("HN fixtures normalize items and strip comment HTML", async () => {
   const urls: string[] = [];
-  const source = hnSource(async input => {
+  const source = hnSource(async (input, init) => {
+    assert.ok(init?.signal instanceof AbortSignal);
     urls.push(String(input));
     return new Response(await readFile(page0), { status: 200, headers: { "content-type": "application/json" } });
   });

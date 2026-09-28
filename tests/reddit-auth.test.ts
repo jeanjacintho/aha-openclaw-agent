@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { clearRedditTokenCache, REDDIT_REFRESH_MARGIN_MS, REDDIT_TOKEN_URL, RedditAuthError, redditAuth } from "../aha/sources/reddit-auth.ts";
 import { redditSource, withRedditToken } from "../aha/sources/reddit.ts";
 
-type Call = { url: string; auth?: string | null; body?: string };
+type Call = { url: string; auth?: string | null; body?: string; signal?: AbortSignal | null };
 
 // A Reddit that issues numbered tokens valid for an hour.
 function reddit(calls: Call[], opts: { status?: number } = {}): typeof fetch {
@@ -11,7 +11,7 @@ function reddit(calls: Call[], opts: { status?: number } = {}): typeof fetch {
   return async (input, init) => {
     const url = String(input);
     const headers = new Headers(init?.headers);
-    calls.push({ url, auth: headers.get("authorization"), body: typeof init?.body === "string" ? init.body : undefined });
+    calls.push({ url, auth: headers.get("authorization"), body: typeof init?.body === "string" ? init.body : undefined, signal: init?.signal });
     if (url === REDDIT_TOKEN_URL) {
       if (opts.status) return new Response(JSON.stringify({ error: "invalid_grant", echo: String(init?.body) }), { status: opts.status });
       issued += 1;
@@ -32,6 +32,7 @@ test("an app-only token is fetched once, reused, and renewed before it expires",
   assert.equal(auth.canPost, false);
   assert.equal(await auth.token(), "tok1");
   assert.equal(calls[0].auth, `Basic ${Buffer.from("cid:csecret").toString("base64")}`);
+  assert.ok(calls[0].signal instanceof AbortSignal);
   assert.equal(calls[0].body, "grant_type=client_credentials");
   now += 3600_000 - REDDIT_REFRESH_MARGIN_MS - 1;
   assert.equal(await auth.token(), "tok1");

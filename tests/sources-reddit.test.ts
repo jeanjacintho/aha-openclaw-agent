@@ -16,6 +16,7 @@ test("Reddit search uses the user token and app User-Agent", async () => {
   const source = redditSource({
     token: "reddit_user_token",
     fetch: async (input, init) => {
+      assert.ok(init?.signal instanceof AbortSignal);
       const h = new Headers(init?.headers);
       headers.push(`${h.get("authorization")}|${h.get("user-agent")}|${String(input)}`);
       return new Response(await readFile(fixture), { status: 200 });

@@ -28,6 +28,7 @@ test("GitHub fetches issues then discussions of the configured repo", async () =
     token: "ghs_test",
     repos,
     fetch: async (_url, init) => {
+      assert.ok(init?.signal instanceof AbortSignal);
       const body = String(init?.body);
       bodies.push(body);
       const file = body.includes("issues(") ? issues : discussions;

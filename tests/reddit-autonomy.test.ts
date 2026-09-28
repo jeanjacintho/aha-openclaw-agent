@@ -92,6 +92,7 @@ test("postReply writes posting then posted and verifies", async t => {
     token: "reddit_user_token",
     now: () => new Date("2026-09-23T12:00:00.000Z"),
     fetch: async (input, init) => {
+      assert.ok(init?.signal instanceof AbortSignal);
       urls.push(`${init?.method ?? "GET"} ${String(input)}`);
       const h = new Headers(init?.headers);
       assert.equal(h.get("authorization"), "Bearer reddit_user_token");

@@ -1,5 +1,5 @@
 import { uniqueTermsCaseInsensitive } from "./hn.ts";
-import { phNextCost, phQueryComplexity, phRemaining, phResetMs, phShouldBackoff } from "./http.ts";
+import { phNextCost, phQueryComplexity, phRemaining, phResetMs, phShouldBackoff, withHttpTimeout } from "./http.ts";
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
 
 const GQL = "https://api.producthunt.com/v2/api/graphql";
@@ -120,6 +120,7 @@ export function productHuntSource(opts: { fetch?: typeof fetch; token?: string }
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
           body: JSON.stringify({ query: QUERY, variables: { slug, after: state.after } }),
+          signal: withHttpTimeout().signal,
         });
         if (response.status === 429) {
           return { ok: false, error: "rate_limited", retryAfterMs: phResetMs(response.headers) };
