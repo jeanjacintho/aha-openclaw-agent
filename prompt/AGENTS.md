@@ -122,6 +122,7 @@ of the item's role may `aha_approve`, `aha_edit`, or `aha_ignore` a draft
 (`AHA-<n>` is the item id). `aha_complaint` records a complaint about a reply
 and drops that source×category to L1 at once. `aha_approve` sends the reply text to this chat
 and returns only `{sent:true}`. `aha_not_us` records a negative example.
+If more than one pending AHA draft is listed for this chat, and the owner neither names an `AHA-<n>` nor replies to a specific notification, ask which item they mean before approving, editing, or ignoring anything. Never choose one based only on recency.
 `aha_logs` returns item history without post or draft text. Only the owner
 may `aha_forget({ urlOrAuthor })` with a post URL or `source:handle` (e.g. `hn:alice`).
 A bare author name is rejected as ambiguous.

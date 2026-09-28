@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { draftAndNotify, draftReply, isBareHost, keepLink, stripOffListLinks, validateReply } from "../aha/responder/drafts.ts";
+import { draftAndNotify, draftReply, isBareHost, keepLink, lastPendingDraftContextForChat, stripOffListLinks, validateReply } from "../aha/responder/drafts.ts";
 import { openStore } from "../aha/store/db.ts";
 
 async function home(t: import("node:test").TestContext) {
@@ -249,6 +249,51 @@ test("concurrent draftAndNotify calls create one active draft without counting a
   assert.equal(completed, 2);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts WHERE item_id = ? AND state IN ('pending', 'approved', 'ignored')").get(itemId) as { n: number }).n, 1);
   assert.equal((store.db.prepare("SELECT draft_attempts FROM items WHERE id = ?").get(itemId) as { draft_attempts: number }).draft_attempts, 0);
+});
+
+function addDraftNotification(store: ReturnType<typeof openStore>, itemId: number, chatUid: string, state = "pending") {
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, 'draft text', ?)").run(itemId, state);
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at)
+    VALUES (?, ?, 'sent', '2026-09-23T12:00:00.000Z', '2026-09-23T12:00:00.000Z')`)
+    .run(`draft:${itemId}:founder`, chatUid);
+}
+
+test("chat context lists up to five pending drafts notified to that chat", async t => {
+  const store = await home(t);
+  const forChat = Array.from({ length: 6 }, () => insertItem(store));
+  const newerForOtherChat = insertItem(store);
+  for (const itemId of forChat) addDraftNotification(store, itemId, "chat-a");
+  addDraftNotification(store, newerForOtherChat, "chat-b");
+
+  assert.deepEqual(lastPendingDraftContextForChat(store, "chat-a"), {
+    label: "Pending AHA drafts notified in this chat",
+    source: "plow",
+    type: "notification",
+    payload: { pending_count: 6, pending_items: forChat.slice(-5).reverse().map(id => `AHA-${id}`) },
+  });
+});
+
+test("chat context omits draft facts without a confirmed notification to that chat", async t => {
+  const store = await home(t);
+  const itemId = insertItem(store);
+  addDraftNotification(store, itemId, "chat-b");
+  assert.equal(lastPendingDraftContextForChat(store, "chat-a"), undefined);
+});
+
+test("chat context ignores drafts that are no longer pending", async t => {
+  const store = await home(t);
+  const pending = insertItem(store);
+  const approved = insertItem(store);
+  const ignored = insertItem(store);
+  const expired = insertItem(store);
+  addDraftNotification(store, pending, "chat-a");
+  addDraftNotification(store, approved, "chat-a", "approved");
+  addDraftNotification(store, ignored, "chat-a", "ignored");
+  addDraftNotification(store, expired, "chat-a", "expired");
+
+  assert.deepEqual(lastPendingDraftContextForChat(store, "chat-a")?.payload, {
+    pending_count: 1, pending_items: [`AHA-${pending}`],
+  });
 });
 
 test("a red-line item is escalated and sent to the routed role group", async t => {

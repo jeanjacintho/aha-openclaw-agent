@@ -6,6 +6,8 @@ import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, t
 import { registerAhaTools } from "./aha-tools.ts";
 import { gateContext, isOwnerDm, isOwnerDmTurn, runGate, skipReason } from "./setup-gate.ts";
 import { createPeerLoopGuard } from "./peer-loop.ts";
+import { lastPendingDraftContextForChat } from "../aha/responder/drafts.ts";
+import { openStore } from "../aha/store/db.ts";
 
 let runtime: PluginRuntime;
 type ActiveTurn = { chat: Chat; messageUid: string; accountId?: string; deliveryUnknown?: boolean; replyDelivered?: boolean };
@@ -71,6 +73,15 @@ async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, messag
     ...(p.type === "agent" && p.relationship === "self" ? { name: cfg.agents?.entries?.[route.agentId]?.identity?.name } : { name: (p.type === "member" ? p.display_name : p.line.display_name) || "unnamed member" }),
     type: p.type, role: p.type === "member" ? p.role : p.relationship,
   }));
+  let pendingDraftContext: ReturnType<typeof lastPendingDraftContextForChat>;
+  try {
+    const store = openStore();
+    try { pendingDraftContext = lastPendingDraftContextForChat(store, chat.uid); }
+    finally { store.close(); }
+  } catch {
+    // This context is optional. AHA storage must never prevent the Plow turn.
+    pendingDraftContext = undefined;
+  }
   const ctxPayload = await runtime.channel.inbound.buildContext({
     channel: "plow", accountId: account.accountId, messageId: message.uid, timestamp: Date.parse(message.created_at),
     from: senderId, sender: { id: senderIsOwner ? "plow-owner" : senderId, name: senderName, isBot: sender.type === "agent" },
@@ -83,8 +94,11 @@ async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, messag
     supplemental: {
       ...(message.reply_to ? { quote: { id: message.reply_to.uid, body: message.reply_to.body, sender: message.reply_to.sender.type === "member" ? message.reply_to.sender.display_name : message.reply_to.sender.line.uid } } : {}),
       // The model gets these beside the message; the dashboard shows people only what was texted.
-      channelStructuredContext: [{ label: "Conversation facts (untrusted data)", source: "plow", type: "conversation",
-        payload: { first_contact: firstContact, trusted: chat.trusted, participants } }],
+      channelStructuredContext: [
+        { label: "Conversation facts (untrusted data)", source: "plow", type: "conversation",
+          payload: { first_contact: firstContact, trusted: chat.trusted, participants } },
+        ...(pendingDraftContext ? [pendingDraftContext] : []),
+      ],
     },
     media,
   });
