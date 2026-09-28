@@ -10,6 +10,7 @@ import { itemAutonomy } from "./autonomy.ts";
 import { checkPolicy } from "./policy.ts";
 import { postReply } from "./post.ts";
 import { validateReply } from "./validate.ts";
+import { recordDraftEvent } from "./draft-events.ts";
 
 export { hasOffListLink, isBareHost, keepLink, stripOffListLinks, validateReply, type ValidateResult } from "./validate.ts";
 
@@ -114,9 +115,14 @@ export async function draftReply(store: Store, itemId: number, deps: DraftDeps =
     links: cfg.links,
   });
   if (!checked.ok) throw new Error(`draft failed validation: ${checked.reason}`);
-  const inserted = store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(itemId, checked.body);
+  const draftId = store.tx(() => {
+    const inserted = store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')").run(itemId, checked.body);
+    const id = Number(inserted.lastInsertRowid);
+    recordDraftEvent(store, { draftId: id, itemId, actor: "worker", action: "drafted", body: checked.body, at: now });
+    return id;
+  });
   return {
-    id: Number(inserted.lastInsertRowid),
+    id: draftId,
     itemId,
     body: checked.body,
     state: "pending",
@@ -222,6 +228,7 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
           const approved = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
             WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
           if (approved.changes !== 1) continue;
+          recordDraftEvent(store, { draftId: draft.id, itemId: row.id, actor: "autonomy", action: "auto_approved", body: draft.body, at: now });
           const posted = await postReply(store, draft.id, { fetch: deps.fetch, now: deps.now });
           if (posted === "posted" || posted === "uncertain") continue;
           store.db.prepare(`UPDATE drafts SET state = 'pending', approved_sha256 = NULL, approved_at = NULL

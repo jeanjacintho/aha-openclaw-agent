@@ -132,7 +132,7 @@ function obeyingFetch(input: RequestInfo | URL, init?: RequestInit) {
 }
 
 function storeHasEvil(store: ReturnType<typeof openStore>) {
-  const tables = ["classifications", "config", "drafts", "deliveries", "ledger", "autonomy", "flags", "feedback_examples"];
+  const tables = ["classifications", "config", "drafts", "draft_events", "deliveries", "ledger", "autonomy", "flags", "feedback_examples"];
   for (const name of tables) {
     const rows = store.db.prepare(`SELECT * FROM ${name}`).all() as Record<string, unknown>[];
     for (const row of rows) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -130,6 +131,11 @@ test("draftReply strips off-list links, signs the body, and stores a pending dra
   assert.match(draft.body, /plow\.example\/docs/);
   assert.match(draft.body, /AI assistant of Plow/);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts").get() as { n: number }).n, 1);
+  const event = store.db.prepare("SELECT actor, action, body_sha256, detail FROM draft_events WHERE draft_id = ?").get(draft.id) as {
+    actor: string; action: string; body_sha256: string; detail: string | null;
+  };
+  assert.deepEqual({ ...event }, { actor: "worker", action: "drafted", body_sha256: createHash("sha256").update(draft.body).digest("hex"), detail: null });
+  assert.equal(JSON.stringify(event).includes(draft.body), false);
 });
 
 test("draftReply refuses a promise of time or price", async t => {

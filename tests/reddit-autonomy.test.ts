@@ -130,6 +130,10 @@ test("postReply rejects a body that no longer matches its approval and releases 
   assert.equal(result, "failed");
   assert.equal(comments, 0);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE key IN (?, ?) AND state = 'ready'").get(postKey, threadKey) as { n: number }).n, 0);
+  const event = store.db.prepare("SELECT action, actor, body_sha256, detail FROM draft_events WHERE draft_id = ?").get(draft.id) as {
+    action: string; actor: string; body_sha256: string; detail: string;
+  };
+  assert.deepEqual({ ...event }, { action: "post_refused", actor: "system", body_sha256: createHash("sha256").update("a different, unapproved body").digest("hex"), detail: "hash_mismatch" });
 });
 
 test("uncertain ledger is never posted again", async t => {
@@ -191,6 +195,7 @@ test("PAUSE blocks L2 posting", async t => {
   });
   assert.equal(result, "failed");
   assert.equal(called, 0);
+  assert.equal((store.db.prepare("SELECT detail FROM draft_events WHERE draft_id = ? ORDER BY id DESC LIMIT 1").get(draft.id) as { detail: string }).detail, "paused");
   assert.equal(itemAutonomy(store, "self", "reddit", "question"), "L1");
 });
 
@@ -249,6 +254,36 @@ test("L2 auto-post runs checkPolicy and will not send a 4th subreddit reply", as
     },
   });
   assert.equal(comments, 0);
+});
+
+test("L2 automatic publication records drafted, auto_approved, posted, and verified without body text", async t => {
+  const { store } = await home(t);
+  plowEnv(t);
+  const { draft } = seedReddit(store);
+  for (let i = 0; i < L2_STREAK; i++) recordDecision(store, draft, "approved");
+  confirmAutonomy(store, "reddit", "question");
+  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
+    VALUES ('reddit', 't1_auto', 'https://www.reddit.com/r/testaha/comments/auto/title/new/', 'bob', 't', 'Question body', '2026-09-22T12:00:00.000Z', '2026-09-22T12:00:00.000Z', 'relevant')`).run();
+  const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId);
+  await draftAndNotify(store, {
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    complete: async () => ({ ok: true, value: { body: "Thanks for asking about Plow queues." } }),
+    fetch: async input => {
+      if (String(input).includes("/api/comment")) return Response.json(posted);
+      if (String(input).includes("/api/info")) return Response.json(verified);
+      return Response.json({ uid: "msg" });
+    },
+  });
+  const events = store.db.prepare("SELECT action, actor, body_sha256, detail FROM draft_events WHERE item_id = ? ORDER BY id").all(itemId) as {
+    action: string; actor: string; body_sha256: string | null; detail: string | null;
+  }[];
+  assert.deepEqual(events.map(event => [event.action, event.actor]), [
+    ["drafted", "worker"], ["auto_approved", "autonomy"], ["posted", "system"], ["verified", "system"],
+  ]);
+  assert.ok(events.every(event => event.body_sha256?.match(/^[a-f0-9]{64}$/)));
+  assert.equal(JSON.stringify(events).includes("Thanks for asking"), false);
 });
 
 test("a stuck posting ledger is treated as uncertain and never resent", async t => {
