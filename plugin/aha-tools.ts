@@ -878,12 +878,15 @@ export function registerAhaTools(api: {
         if (!policy.allow) return ok({ sent: false, reason: policy.reasons.join("; ") });
         const approvedAt = now.toISOString();
         const approvedSha256 = createHash("sha256").update(draft.body).digest("hex");
-        const claimed = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
-          WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
-        if (claimed.changes !== 1) return fail("draft changed before approval; review it again");
-        recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "approved", body: draft.body, at: now });
-        recordReady(store, draft, now);
-        const decision = recordDecision(store, draft, "approved");
+        const decision = store.tx(() => {
+          const claimed = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
+            WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
+          if (claimed.changes !== 1) return undefined;
+          recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "approved", body: draft.body, at: now });
+          recordReady(store, draft, now);
+          return recordDecision(store, draft, "approved");
+        });
+        if (!decision) return fail("draft changed before approval; review it again");
         if (decision.suggest) {
           const cfg = getConfig(store);
           const owner = cfg?.ownerChatUid;
@@ -955,10 +958,14 @@ export function registerAhaTools(api: {
           links: cfg?.links,
         });
         if (!checked.ok) return fail(`draft failed validation: ${checked.reason}`);
-        const updated = store.db.prepare("UPDATE drafts SET body = ? WHERE id = ? AND state = 'pending'").run(checked.body, draft.id);
-        if (updated.changes !== 1) return fail("draft is no longer pending");
-        recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "edited", body: checked.body });
-        recordDecision(store, { ...draft, body: checked.body }, "edited");
+        const updated = store.tx(() => {
+          const result = store.db.prepare("UPDATE drafts SET body = ? WHERE id = ? AND state = 'pending'").run(checked.body, draft.id);
+          if (result.changes !== 1) return false;
+          recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "edited", body: checked.body });
+          recordDecision(store, { ...draft, body: checked.body }, "edited");
+          return true;
+        });
+        if (!updated) return fail("draft is no longer pending");
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, edited: true });
       } finally {
         store.close();
@@ -992,10 +999,14 @@ export function registerAhaTools(api: {
         if (!draft || draft.state !== "pending") return fail("draft not found");
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
-        const updated = store.db.prepare("UPDATE drafts SET state = 'ignored' WHERE id = ? AND state = 'pending'").run(draft.id);
-        if (updated.changes !== 1) return fail("draft is no longer pending");
-        recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "ignored", body: draft.body });
-        recordDecision(store, { ...draft, state: "ignored" }, "ignored");
+        const updated = store.tx(() => {
+          const result = store.db.prepare("UPDATE drafts SET state = 'ignored' WHERE id = ? AND state = 'pending'").run(draft.id);
+          if (result.changes !== 1) return false;
+          recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "ignored", body: draft.body });
+          recordDecision(store, { ...draft, state: "ignored" }, "ignored");
+          return true;
+        });
+        if (!updated) return fail("draft is no longer pending");
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, ignored: true });
       } finally {
         store.close();

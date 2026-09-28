@@ -111,6 +111,28 @@ test("postReply writes posting then posted and verifies", async t => {
   assert.equal(row.state, "verified");
 });
 
+test("a second draft on the same thread is refused without a posted event", async t => {
+  const { store } = await home(t);
+  const first = seedReddit(store, { externalId: "t1_first" });
+  const second = seedReddit(store, { externalId: "t1_second" });
+  let comments = 0;
+  const fetch = async (input: RequestInfo | URL) => {
+    if (String(input).includes("/api/comment")) {
+      comments += 1;
+      return Response.json(posted);
+    }
+    return Response.json(verified);
+  };
+  assert.equal(await postReply(store, first.draft.id, { token: "reddit_user_token", now: () => new Date("2026-09-23T12:00:00.000Z"), fetch }), "posted");
+  assert.equal(await postReply(store, second.draft.id, { token: "reddit_user_token", now: () => new Date("2026-09-23T12:00:00.000Z"), fetch }), "failed");
+  assert.equal(comments, 1);
+  const events = store.db.prepare("SELECT action, detail FROM draft_events WHERE draft_id = ? ORDER BY id").all(second.draft.id) as {
+    action: string; detail: string | null;
+  }[];
+  assert.deepEqual(events.map(event => [event.action, event.detail]), [["post_refused", "thread_taken"]]);
+  assert.equal(events.some(event => event.action === "posted"), false);
+});
+
 test("postReply rejects a body that no longer matches its approval and releases ready reservations", async t => {
   const { store } = await home(t);
   const { draft } = seedReddit(store);
@@ -348,8 +370,12 @@ test("one Reddit reply per thread uses the post id, not the comment id", async t
       return Response.json(posted);
     },
   });
-  assert.equal(result, "posted");
+  assert.equal(result, "failed");
   assert.equal(comments, 0);
+  const refusal = store.db.prepare("SELECT action, detail FROM draft_events WHERE draft_id = ? ORDER BY id DESC LIMIT 1").get(second.draft.id) as {
+    action: string; detail: string;
+  };
+  assert.deepEqual({ ...refusal }, { action: "post_refused", detail: "thread_taken" });
 });
 
 test("a complaint drops autonomy to L1 immediately", async t => {

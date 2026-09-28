@@ -256,6 +256,29 @@ test("aha_ignore records the actor but never the free-text reason", async t => {
   assert.equal(JSON.stringify(event).includes(reason), false);
 });
 
+test("approval, edit, and ignore roll back when their audit event cannot be written", async t => {
+  const dir = await home(t);
+  const { itemId, draftId } = seed(dir);
+  const store = openStore(dir);
+  store.db.exec(`CREATE TRIGGER fail_draft_audit BEFORE INSERT ON draft_events
+    WHEN NEW.action IN ('approved', 'edited', 'ignored')
+    BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`);
+  store.close();
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await assert.rejects(() => owner.get("aha_approve")!.execute("approve", { draftId: `AHA-${itemId}` }), /audit unavailable/);
+  await assert.rejects(() => owner.get("aha_edit")!.execute("edit", {
+    draftId: `AHA-${itemId}`, text: "A changed answer. — AHA, AI assistant of Plow",
+  }), /audit unavailable/);
+  await assert.rejects(() => owner.get("aha_ignore")!.execute("ignore", { draftId: `AHA-${itemId}`, reason: "not needed" }), /audit unavailable/);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  const draft = after.db.prepare("SELECT state, body FROM drafts WHERE id = ?").get(draftId) as { state: string; body: string };
+  assert.equal(draft.state, "pending");
+  assert.equal(draft.body, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+  assert.equal((after.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE state = 'ready'").get() as { n: number }).n, 0);
+  assert.equal((after.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE item_id = ?").get(itemId) as { n: number }).n, 0);
+});
+
 test("Reddit approval reports a confirmed post as sent", async t => {
   const posts: { url: string; body: string }[] = [];
   const dir = await home(t, posts, "posted");

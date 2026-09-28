@@ -60,13 +60,9 @@ function freezePosting(store: Store, key: string, url: string | null) {
   store.db.prepare("UPDATE ledger SET state = 'uncertain', url = ? WHERE key = ? AND state = 'posting'").run(url, key);
 }
 
-function haltFrom(state: string | undefined): PostResult | undefined {
-  if (!state) return;
-  if (state === "uncertain" || state === "posting") return "uncertain";
-  if (state === "posted" || state === "verified") return "posted";
-}
+type PostClaimResult = PostResult | "owned" | "already_posted" | "thread_taken";
 
-function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostResult | "owned" {
+function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostClaimResult {
   return store.tx(() => {
     const post = ledgerState(store, postKey);
     const thread = ledgerState(store, threadKey);
@@ -75,14 +71,19 @@ function claimKeys(store: Store, postKey: string, threadKey: string, url: string
       freezePosting(store, threadKey, url);
       return "uncertain";
     }
-    const halt = haltFrom(post?.state) ?? haltFrom(thread?.state);
-    if (halt) return halt;
+    if (post?.state === "posted" || post?.state === "verified") return "already_posted";
+    if (thread?.state === "posted" || thread?.state === "verified") return "thread_taken";
+    if (post?.state === "uncertain" || thread?.state === "uncertain") return "uncertain";
     const threadReadyForeign = thread?.state === "ready" && post?.state !== "ready" && post?.state !== "failed";
-    if (threadReadyForeign) return "posted";
+    if (threadReadyForeign) return "thread_taken";
     if (!takeKey(store, postKey, url) || !takeKey(store, threadKey, url)) {
       freezePosting(store, postKey, url);
       freezePosting(store, threadKey, url);
-      return haltFrom(ledgerState(store, postKey)?.state) ?? haltFrom(ledgerState(store, threadKey)?.state) ?? "uncertain";
+      const currentPost = ledgerState(store, postKey)?.state;
+      const currentThread = ledgerState(store, threadKey)?.state;
+      if (currentPost === "posted" || currentPost === "verified") return "already_posted";
+      if (currentThread === "posted" || currentThread === "verified") return "thread_taken";
+      return "uncertain";
     }
     return "owned";
   });
@@ -168,7 +169,15 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   const claimed = claimKeys(store, key, thread, item.url);
   if (claimed !== "owned") {
     if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
-    event(claimed === "uncertain" ? "uncertain" : claimed === "posted" ? "posted" : "failed");
+    if (claimed === "already_posted") {
+      event("post_refused", "already_posted");
+      return "posted";
+    }
+    if (claimed === "thread_taken") {
+      event("post_refused", "thread_taken");
+      return "failed";
+    }
+    event(claimed === "uncertain" ? "uncertain" : "failed");
     return claimed;
   }
   const http = deps.fetch ?? fetch;

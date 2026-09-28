@@ -3,7 +3,7 @@ import { type Store } from "../store/db.ts";
 
 export type DraftEventAction = "drafted" | "edited" | "approved" | "ignored" | "auto_approved"
   | "post_refused" | "posted" | "verified" | "uncertain" | "failed";
-export type DraftEventDetail = "item_missing" | "unsupported_source" | "not_approved" | "hash_mismatch" | "paused"
+export type DraftEventDetail = "item_missing" | "unsupported_source" | "not_approved" | "hash_mismatch" | "paused" | "already_posted" | "thread_taken"
   | "cannot_post" | "auth_error" | "network_error" | "response_invalid" | `http_${number}`;
 
 type DraftEvent = {
