@@ -128,7 +128,13 @@ test("an unknown competitor about value goes to needs_review", async t => {
 test("feedback_examples enter the classification prompt", async t => {
   const store = await home(t);
   const item = insert(store);
-  store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, ?, ?)").run(item.id, "negative", "NOT US AHA-123\nsource: hn\ntitle: Plow snow plow service\npost: Does this company provide snow plowing?");
+  store.db.prepare("UPDATE items SET title = ? WHERE id = ?").run("Plow snow plow service", item.id);
+  store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, ?, ?)").run(item.id, "negative", `NOT US AHA-${item.id}`);
+  const forgotten = insert(store, { externalId: "forgotten" });
+  store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, ?, ?)").run(forgotten.id, "negative", `NOT US AHA-${forgotten.id}`);
+  store.db.exec("PRAGMA foreign_keys = OFF");
+  store.db.prepare("DELETE FROM items WHERE id = ?").run(forgotten.id);
+  store.db.exec("PRAGMA foreign_keys = ON");
   let prompt = "";
   await classifyBatch(store, [item], {
     complete: async req => {
@@ -136,7 +142,8 @@ test("feedback_examples enter the classification prompt", async t => {
       return { ok: true, value: { results: [{ id: item.id, ...valid() }] } };
     },
   });
-  assert.match(prompt, /NOT US AHA-123\\nsource: hn\\ntitle: Plow snow plow service\\npost: Does this company provide snow plowing\?/);
+  assert.match(prompt, new RegExp(`NOT US AHA-${item.id}\\\\nsource: hn\\\\ntitle: Plow snow plow service\\\\npost: Does plow queue jobs\\?`));
+  assert.doesNotMatch(prompt, new RegExp(`NOT US AHA-${forgotten.id}`));
   assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(item.id) as { state: string }).state, "relevant");
   const row = store.db.prepare("SELECT category, confidence, about FROM classifications WHERE item_id = ?").get(item.id) as { category: string; confidence: number; about: string };
   assert.equal(row.category, "question");
