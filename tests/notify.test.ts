@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { DELIVERY_RETRY_GRACE_MS, retryUncertainDeliveries, sendToChat } from "../aha/notify/plow.ts";
+import { DELIVERY_MAX_AGE_MS, DELIVERY_RETRY_GRACE_MS, retryUncertainDeliveries, sendToChat } from "../aha/notify/plow.ts";
 import { openStore } from "../aha/store/db.ts";
 
 const environment = { ...process.env };
@@ -34,6 +34,7 @@ test("the same key is delivered once", async t => {
   assert.equal(await sendToChat("cht_dm", "hello", "k1", { store, fetch: fetchImpl }), "duplicate");
   assert.equal(posts.length, 1);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM deliveries").get() as { n: number }).n, 1);
+  assert.equal((store.db.prepare("SELECT body FROM deliveries WHERE key = 'k1'").get() as { body: string | null }).body, null);
 });
 
 test("two overlapping sends with the same key post once", async t => {
@@ -116,6 +117,25 @@ test("periodic retry resends stale uncertain deliveries with their stored body",
   assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = 'k-failed-periodic'").get() as { status: string }).status, "failed");
 });
 
+test("periodic retry discards uncertain deliveries after 24 hours and clears their body", async t => {
+  const store = await home(t);
+  const now = new Date("2026-09-23T12:00:00.000Z");
+  const at = new Date(now.getTime() - DELIVERY_MAX_AGE_MS - 1).toISOString();
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at, body)
+    VALUES ('k-expired', 'cht_dm', 'uncertain', ?, ?, 'expired body')`).run(at, at);
+  let posts = 0;
+  const fetchImpl = async () => {
+    posts += 1;
+    return Response.json({ uid: "unexpected" });
+  };
+
+  assert.equal(await retryUncertainDeliveries(store, now, { fetch: fetchImpl }), 0);
+  const row = store.db.prepare("SELECT status, body FROM deliveries WHERE key = 'k-expired'").get() as { status: string; body: string | null };
+  assert.equal(row.status, "failed");
+  assert.equal(row.body, null);
+  assert.equal(posts, 0);
+});
+
 test("a fetch timeout returns uncertain instead of hanging", async t => {
   const store = await home(t);
   const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => {
@@ -129,8 +149,9 @@ test("a fetch timeout returns uncertain instead of hanging", async t => {
   assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = 'k-timeout'").get() as { status: string }).status, "uncertain");
 });
 
-test("HTTP 200 with a non-JSON body stays uncertain and is not posted again", async t => {
+test("HTTP 200 with a non-JSON body is terminal even after the grace period", async t => {
   const store = await home(t);
+  const now = new Date("2026-09-23T12:00:00.000Z");
   let posts = 0;
   const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "POST") {
@@ -139,9 +160,11 @@ test("HTTP 200 with a non-JSON body stays uncertain and is not posted again", as
     }
     return new Response("", { status: 404 });
   };
-  assert.equal(await sendToChat("cht_dm", "hello", "k-json", { store, fetch: fetchImpl }), "uncertain");
-  assert.equal(await sendToChat("cht_dm", "hello", "k-json", { store, fetch: fetchImpl }), "uncertain");
+  assert.equal(await sendToChat("cht_dm", "hello", "k-json", { store, fetch: fetchImpl, now: () => now }), "sent");
+  assert.equal(await sendToChat("cht_dm", "hello", "k-json", { store, fetch: fetchImpl, now: () => new Date(now.getTime() + DELIVERY_RETRY_GRACE_MS + 1) }), "duplicate");
+  assert.equal(await retryUncertainDeliveries(store, new Date(now.getTime() + DELIVERY_RETRY_GRACE_MS + 1), { fetch: fetchImpl }), 0);
   assert.equal(posts, 1);
+  assert.equal((store.db.prepare("SELECT body FROM deliveries WHERE key = 'k-json'").get() as { body: string | null }).body, null);
 });
 
 test("a failed key is retried", async t => {
@@ -156,6 +179,7 @@ test("a failed key is retried", async t => {
     return new Response("", { status: 404 });
   };
   assert.equal(await sendToChat("cht_dm", "hello", "k-fail", { store, fetch: fetchImpl }), "failed");
+  assert.equal((store.db.prepare("SELECT body FROM deliveries WHERE key = 'k-fail'").get() as { body: string | null }).body, null);
   assert.equal(await sendToChat("cht_dm", "hello", "k-fail", { store, fetch: fetchImpl }), "sent");
   assert.equal(posts, 2);
 });
