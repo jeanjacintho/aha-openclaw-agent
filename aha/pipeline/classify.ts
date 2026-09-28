@@ -42,7 +42,22 @@ export type ClassifyDeps = CompleteDeps & {
 };
 
 function feedbackExamples(store: Store) {
-  return store.db.prepare("SELECT kind, text FROM feedback_examples ORDER BY id DESC LIMIT 20").all() as { kind: string; text: string }[];
+  const rows = store.db.prepare(`SELECT feedback_examples.kind, feedback_examples.item_id,
+      items.source, items.title, items.body
+    FROM feedback_examples
+    JOIN items ON items.id = feedback_examples.item_id
+    ORDER BY feedback_examples.id DESC LIMIT 20`).all() as {
+      kind: string; item_id: number; source: string; title: string | null; body: string | null;
+    }[];
+  return rows.map(row => ({
+    kind: row.kind,
+    text: [
+      `NOT US AHA-${row.item_id}`,
+      `source: ${row.source}`,
+      row.title ? `title: ${row.title}` : undefined,
+      row.body ? `post: ${row.body.slice(0, 1200)}` : undefined,
+    ].filter((line): line is string => line !== undefined).join("\n"),
+  }));
 }
 
 function postsFor(items: ItemRow[]) {
