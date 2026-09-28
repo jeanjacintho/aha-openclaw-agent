@@ -11,7 +11,7 @@ import { openStore, type Store } from "../aha/store/db.ts";
 import { ForgetError, forgetByUrlOrAuthor } from "../aha/store/retention.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
 import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
-import { postReply, threadLedgerKey } from "../aha/responder/post.ts";
+import { postReply, threadLedgerKey, type PostResult } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
 import { parseDue } from "../aha/promises/check.ts";
 import { clearDraft, deferSetup, getDraft, nextQuestion, recordableFields, recordAnswers, setupStatus, type SetupAnswers } from "../aha/setup/draft.ts";
@@ -845,7 +845,7 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_approve",
     label: "Approve an AHA draft",
-    description: "Approve the pending draft for an item (AHA-n is always the item id). Owner or a member of the item's role. Sends the reply text to this chat; the tool result is only {sent:true}.",
+    description: "Approve the pending draft for an item (AHA-n is always the item id). Owner or a member of the item's role. For Reddit, reports whether the post was confirmed, failed, or is uncertain; other sources report whether the confirmation was sent to this chat.",
     parameters: {
       type: "object",
       required: ["draftId"],
@@ -878,11 +878,23 @@ export function registerAhaTools(api: {
           }
         }
         const item = store.db.prepare("SELECT url, source FROM items WHERE id = ?").get(draft.itemId) as { url: string | null; source: string };
-        if (item.source === "reddit") await postReply(store, draft.id);
+        const redditPost: PostResult | undefined = item.source === "reddit" ? await postReply(store, draft.id) : undefined;
         const chat = ctx.nativeChannelId;
         if (!chat) return fail("missing chat");
-        const text = `${draft.body}${item.url ? `\n${item.url}` : ""}`;
+        const cfg = getConfig(store);
+        const lang = cfg?.language || "pt";
+        const postStatus = redditPost === "posted"
+          ? (lang.startsWith("pt") ? "Publicado no Reddit." : "Posted on Reddit.")
+          : redditPost === "uncertain"
+            ? (lang.startsWith("pt") ? "Publicação no Reddit não confirmada; confira o thread antes de tentar novamente." : "Reddit posting is unconfirmed; check the thread before trying again.")
+            : redditPost === "failed"
+              ? (lang.startsWith("pt") ? "Não foi possível publicar no Reddit; a aprovação foi registrada, mas o post não foi enviado." : "Reddit posting failed; approval was recorded, but the post was not sent.")
+              : undefined;
+        const text = `${draft.body}${item.url ? `\n${item.url}` : ""}${postStatus ? `\n\n${postStatus}` : ""}`;
         const result = await sendToChat(chat, text, `approve:${draft.id}`, { store });
+        if (redditPost === "failed" || redditPost === "uncertain") {
+          return ok({ sent: false, reason: `reddit post ${redditPost}`, confirmationSent: result === "sent" });
+        }
         return ok(digestSendReply(result));
       } finally {
         store.close();

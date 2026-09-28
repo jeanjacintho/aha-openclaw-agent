@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { sendToChat } from "../aha/notify/plow.ts";
+import { writeSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
 import entry from "../plugin/index.ts";
 
@@ -25,12 +26,16 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function home(t: import("node:test").TestContext, posts: { url: string; body: string }[] = []) {
+async function home(t: import("node:test").TestContext, posts: { url: string; body: string }[] = [], redditOutcome?: "posted" | "uncertain") {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-approve-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.includes("oauth.reddit.com/api/comment")) {
+      if (redditOutcome === "posted") return Response.json({ json: { data: { things: [{ data: { name: "t1_reply", permalink: "/r/test/comments/thread/reply" } }] } } });
+      if (redditOutcome === "uncertain") return new Response("gateway error", { status: 500 });
+    }
     if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
       posts.push({ url, body: String(init?.body ?? "") });
       return Response.json({ uid: "msg_ok" });
@@ -67,6 +72,20 @@ function seed(dir: string, over: { category?: string } = {}) {
   const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, 0, ?, 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId, over.category ?? "question");
+  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')")
+    .run(itemId, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+  const draftId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.close();
+  return { itemId, draftId };
+}
+
+function seedReddit(dir: string) {
+  const store = openStore(dir);
+  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
+    VALUES ('reddit', 't3_thread', 'https://www.reddit.com/r/test/comments/thread/', 'alice', 'Plow queues', 'Does plow queue jobs?', '2026-09-22T00:00:00.000Z', '2026-09-22T00:00:00.000Z', 'assigned')`).run();
+  const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId);
   store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')")
     .run(itemId, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
   const draftId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
@@ -144,6 +163,41 @@ test("approving sends the reply to the chat and returns only sent:true", async t
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT state FROM drafts WHERE id = ?").get(draftId) as { state: string }).state, "approved");
+});
+
+test("Reddit approval reports a confirmed post as sent", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts, "posted");
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const { itemId, draftId } = seedReddit(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  assert.deepEqual(result.details, { sent: true });
+  assert.match(posts[0].body, /Publicado no Reddit\./);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal((store.db.prepare("SELECT state FROM drafts WHERE id = ?").get(draftId) as { state: string }).state, "approved");
+});
+
+test("Reddit approval reports an uncertain post without claiming success", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts, "uncertain");
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const { itemId } = seedReddit(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  assert.deepEqual(result.details, { sent: false, reason: "reddit post uncertain", confirmationSent: true });
+  assert.match(posts.find(post => post.url.includes("/chats/cht_dm/messages") && post.body.includes("Publicação no Reddit"))!.body, /Publicação no Reddit não confirmada/);
+});
+
+test("Reddit approval reports a failed post without claiming success", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  const { itemId } = seedReddit(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  assert.deepEqual(result.details, { sent: false, reason: "reddit post failed", confirmationSent: true });
+  assert.match(posts.find(post => post.url.includes("/chats/cht_dm/messages"))!.body, /Não foi possível publicar no Reddit/);
 });
 
 test("AHA-n always names the item, not a draft with the same number", async t => {
