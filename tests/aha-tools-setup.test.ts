@@ -275,6 +275,31 @@ test("aha_digest_now does not consume the scheduled daily digest key", async t =
   assert.equal(keys.filter(key => /^digest:\d{4}-\d{2}-\d{2}:founder:cht_dm$/.test(key)).length, 1);
 });
 
+test("aha_digest_now sends only to the owner DM while scheduled delivery still includes role groups", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  await map.get("aha_setup_save")!.execute("call", setupArgs);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  saveConfig(store, {
+    ...getConfig(store)!,
+    roleChats: { founder: "cht_founder", marketing: "cht_marketing" },
+  });
+
+  const manual = await map.get("aha_digest_now")!.execute("call", {});
+  assert.deepEqual(manual.details, { sent: true });
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].url, /cht_dm\/messages/);
+
+  assert.equal(await deliverDigest(store), "sent");
+  assert.deepEqual(posts.slice(1).map(post => post.url).sort(), [
+    "http://plow.test/v1/chats/cht_dm/messages",
+    "http://plow.test/v1/chats/cht_founder/messages",
+    "http://plow.test/v1/chats/cht_marketing/messages",
+  ].sort());
+});
+
 test("aha_digest_now reports sent:false when delivery is duplicate or uncertain", async t => {
   const posts: { url: string; body: string }[] = [];
   const dir = await home(t, posts);
