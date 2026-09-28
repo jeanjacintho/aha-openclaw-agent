@@ -60,9 +60,12 @@ const verified = verifiedFor("t1_abc");
 async function runVerifyFixture(
   t: import("node:test").TestContext,
   fixture: unknown | Response,
-  options: { username?: string; expectedBody?: string } = {},
+  options: { username?: string; expectedBody?: string; language?: "pt" | "en" } = {},
 ) {
   const { store, dir } = await home(t);
+  if (options.language) {
+    saveConfig(store, { company: { name: "Plow", aliases: ["plow"] }, language: options.language, ownerChatUid: "cht_dm" });
+  }
   const { itemId, draft } = seedReddit(store);
   if (options.expectedBody) {
     const hash = createHash("sha256").update(options.expectedBody).digest("hex");
@@ -157,22 +160,27 @@ test("postReply writes posting then posted and verifies", async t => {
 test("verify mismatch in parent leaves ledger posted and notifies the owner once", async t => {
   plowEnv(t);
   const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t3_wrong", body: draftBody, author: "aha" } }] } };
-  const { store, draft, result, fetch, messages } = await runVerifyFixture(t, fixture);
+  const { store, draft, result, fetch, messages } = await runVerifyFixture(t, fixture, { language: "pt" });
   assert.equal(result, "posted");
   assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "posted");
   assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "parent_mismatch" });
   assert.equal(messages.length, 1);
   assert.match(messages[0], new RegExp(`AHA-${draft.itemId}`));
   assert.match(messages[0], /https:\/\/www\.reddit\.com\/r\/testaha\/comments\/xyz\/title\/posted\//);
+  assert.match(JSON.parse(messages[0]).body, /a resposta caiu em outro comentário ou post/);
+  assert.doesNotMatch(JSON.parse(messages[0]).body, /parent_mismatch/);
   assert.equal(await postReply(store, draft.id, { auth: { token: async () => "token", invalidate() {}, canPost: true }, fetch }), "posted");
   assert.equal(messages.length, 1);
 });
 
 test("verify detects a body mismatch", async t => {
+  plowEnv(t);
   const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: "different text", author: "aha" } }] } };
-  const { store, draft, result } = await runVerifyFixture(t, fixture);
+  const { store, draft, result, messages } = await runVerifyFixture(t, fixture);
   assert.equal(result, "posted");
   assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "body_mismatch" });
+  assert.match(JSON.parse(messages[0]).body, /the published text differs from the approved text/);
+  assert.doesNotMatch(JSON.parse(messages[0]).body, /body_mismatch/);
 });
 
 test("verify normalizes Reddit HTML escapes, line endings, and trailing spaces", async t => {
@@ -185,18 +193,32 @@ test("verify normalizes Reddit HTML escapes, line endings, and trailing spaces",
   assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "verified");
 });
 
+test("verify preserves literal HTML entities in the approved body", async t => {
+  const expected = "Use &lt;tag&gt; &amp; x\n— AHA, AI assistant of Plow";
+  const redditBody = "Use &amp;lt;tag&amp;gt; &amp;amp; x\n— AHA, AI assistant of Plow";
+  const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: redditBody, author: "aha" } }] } };
+  const { store, draft } = await runVerifyFixture(t, fixture, { expectedBody: expected });
+  assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verified", detail: null });
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key LIKE 'post:%'").get() as { state: string }).state, "verified");
+});
+
 test("verify detects an author mismatch when Reddit credentials identify the account", async t => {
+  plowEnv(t);
   const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: draftBody, author: "someone-else" } }] } };
-  const { store, draft } = await runVerifyFixture(t, fixture, { username: "aha" });
+  const { store, draft, messages } = await runVerifyFixture(t, fixture, { username: "aha" });
   assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "author_mismatch" });
+  assert.match(JSON.parse(messages[0]).body, /the reply was posted by another account/);
+  assert.doesNotMatch(JSON.parse(messages[0]).body, /author_mismatch/);
 });
 
 test("verify reports a reliably removed comment and notifies the owner", async t => {
   plowEnv(t);
   const fixture = { data: { children: [{ data: { name: "t1_posted", parent_id: "t1_abc", body: "[removed]", author: "aha" } }] } };
-  const { store, draft, messages } = await runVerifyFixture(t, fixture);
+  const { store, draft, messages } = await runVerifyFixture(t, fixture, { language: "pt" });
   assert.deepEqual({ ...verifyEvent(store, draft.id) }, { action: "verify_mismatch", detail: "removed" });
   assert.equal(messages.length, 1);
+  assert.match(JSON.parse(messages[0]).body, /a resposta foi removida pela moderação/);
+  assert.doesNotMatch(JSON.parse(messages[0]).body, /\bverify_mismatch\b/);
 });
 
 test("verify read failure records unavailable and does not notify", async t => {

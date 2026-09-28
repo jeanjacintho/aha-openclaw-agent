@@ -103,9 +103,12 @@ type VerifyResult = { status: "verified" } | { status: "mismatch"; detail: "pare
 function normalizeRedditBody(value: string) {
   return value
     .replace(/\r\n?/g, "\n")
-    .replace(/&(amp|lt|gt);/g, entity => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">" })[entity]!)
     .split("\n").map(line => line.replace(/[ \t]+$/g, "")).join("\n")
     .trimEnd();
+}
+
+function unescapeRedditBody(value: string) {
+  return value.replace(/&(amp|lt|gt);/g, entity => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">" })[entity]!);
 }
 
 async function verify(
@@ -123,7 +126,7 @@ async function verify(
   } }[] } };
   const comment = (payload.data?.children ?? []).find(child => child.data?.name === fullname)?.data;
   if (!comment || typeof comment.parent_id !== "string" || typeof comment.body !== "string") return { status: "unavailable" };
-  const body = normalizeRedditBody(comment.body);
+  const body = normalizeRedditBody(unescapeRedditBody(comment.body));
   if (body === "[removed]" || body === "[deleted]") return { status: "mismatch", detail: "removed" };
   if (comment.parent_id !== parentId) return { status: "mismatch", detail: "parent_mismatch" };
   if (body !== normalizeRedditBody(approvedBody)) return { status: "mismatch", detail: "body_mismatch" };
@@ -148,13 +151,26 @@ async function notifyUncertain(store: Store, itemId: number, key: string, deps: 
   }
 }
 
-async function notifyVerificationMismatch(store: Store, itemId: number, key: string, detail: string, url: string | null, deps: PostDeps) {
+async function notifyVerificationMismatch(
+  store: Store,
+  itemId: number,
+  key: string,
+  detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed",
+  url: string | null,
+  deps: PostDeps,
+) {
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
   const lang = getConfig(store)?.language || "en";
+  const reason = {
+    parent_mismatch: { pt: "a resposta caiu em outro comentário ou post", en: "the reply landed under a different comment or post" },
+    body_mismatch: { pt: "o texto publicado difere do aprovado", en: "the published text differs from the approved text" },
+    author_mismatch: { pt: "a resposta foi publicada por outra conta", en: "the reply was posted by another account" },
+    removed: { pt: "a resposta foi removida pela moderação", en: "the reply was removed by moderators" },
+  }[detail];
   const text = lang.startsWith("pt")
-    ? `Verificação do post AHA-${itemId} encontrou divergência (${detail}). Confira: ${url ?? "link indisponível"}`
-    : `AHA-${itemId} post verification found a mismatch (${detail}). Check: ${url ?? "link unavailable"}`;
+    ? `Verificação do post AHA-${itemId}: ${reason.pt}. Confira: ${url ?? "link indisponível"}`
+    : `AHA-${itemId} post verification: ${reason.en}. Check: ${url ?? "link unavailable"}`;
   try {
     await sendToChat(owner, text, `verify:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
