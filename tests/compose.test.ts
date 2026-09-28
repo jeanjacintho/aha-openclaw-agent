@@ -24,7 +24,7 @@ test("Compose keeps the agent on loopback, honors HOST_PORT, and restarts it", a
   await fs.copyFile(new URL("../compose.yml", import.meta.url), path.join(dir, "compose.yml"));
   await fs.writeFile(path.join(dir, "plow-credentials"), "PLOW_AGENT_TOKEN=test-token\n");
   await fs.mkdir(path.join(dir, "dev"));
-  await fs.copyFile(new URL("../dev/Caddyfile", import.meta.url), path.join(dir, "dev/Caddyfile"));
+  await fs.writeFile(path.join(dir, "dev/Caddyfile"), ":80 {\n  respond \"ok\"\n}\n");
 
   const render = (hostPort?: string) => {
     const env = { ...process.env };
