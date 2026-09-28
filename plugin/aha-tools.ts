@@ -1037,7 +1037,17 @@ export function registerAhaTools(api: {
       try {
         const blocked = canActOnItem(store, ctx, itemId);
         if (blocked) return blocked;
-        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'negative', ?)").run(itemId, `NOT US AHA-${itemId}`);
+        const item = store.db.prepare("SELECT source, title, body FROM items WHERE id = ?").get(itemId) as {
+          source: string; title: string | null; body: string | null;
+        } | undefined;
+        if (!item) return fail("item not found");
+        const example = [
+          `NOT US AHA-${itemId}`,
+          `source: ${item.source}`,
+          item.title ? `title: ${item.title}` : undefined,
+          item.body ? `post: ${item.body.slice(0, 1200)}` : undefined,
+        ].filter((line): line is string => line !== undefined).join("\n");
+        store.db.prepare("INSERT INTO feedback_examples (item_id, kind, text) VALUES (?, 'negative', ?)").run(itemId, example);
         store.db.prepare("UPDATE items SET state = 'irrelevant' WHERE id = ?").run(itemId);
         return ok({ itemId, publicId: `AHA-${itemId}`, recorded: true });
       } finally {
