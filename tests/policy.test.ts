@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import entry from "../plugin/index.ts";
 import { saveConfig } from "../aha/config.ts";
-import { checkPolicy, POLICY } from "../aha/responder/policy.ts";
+import { checkPolicy, POLICY, postingLimitReasons, recordReady } from "../aha/responder/policy.ts";
 import { type Draft } from "../aha/responder/drafts.ts";
 import { openStore } from "../aha/store/db.ts";
 
@@ -155,6 +155,10 @@ async function policyHome(t: import("node:test").TestContext) {
 
 const now = new Date("2026-09-23T12:00:00.000Z");
 
+function claim(store: ReturnType<typeof openStore>, key: string, at: Date, state = "posted") {
+  store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, ?, NULL, ?)").run(key, state, at.toISOString());
+}
+
 test("response policy allows a mention with a valid draft", async t => {
   const store = await policyHome(t);
   const draft = seedItem(store);
@@ -213,6 +217,110 @@ test("response policy rule 5 fails only when the daily reply limit is full", asy
   const result = checkPolicy(store, draft, now);
   assert.equal(result.allow, false);
   if (!result.allow) assert.deepEqual(result.reasons, [POLICY.rateLimit]);
+});
+
+test("rolling 24-hour total blocks a 23:59 to 00:01 burst and reports release time", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 1, perCommunityPerDay: 10, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  claim(store, "post:2026-09-23:reddit:testaha:t1_late", new Date("2026-09-23T23:59:00.000Z"));
+  const checkAt = new Date("2026-09-24T00:01:00.000Z");
+  const result = postingLimitReasons(store, draft.itemId, checkAt);
+  assert.deepEqual(result.reasons, ["rolling 24-hour posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T23:59:00.000Z");
+});
+
+test("total limit release accounts for claims above the configured limit", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 2, perCommunityPerDay: 10, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "hn", externalId: "new-total-limit" });
+  for (const [index, hour] of [8, 9, 10, 11].entries()) {
+    claim(store, `post:2026-09-23:hn:history-${index}`, new Date(`2026-09-23T${String(hour).padStart(2, "0")}:00:00.000Z`));
+  }
+  const result = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(result.reasons, ["rolling 24-hour posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T10:00:00.000Z");
+});
+
+test("minimum Reddit interval blocks a second post and clears at the reported time", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 10, perCommunityPerDay: 3, minIntervalMinutes: 10 },
+  });
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  claim(store, "post:2026-09-23:reddit:elsewhere:t1_recent", new Date("2026-09-23T11:55:00.000Z"));
+  const blocked = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(blocked.reasons, ["minimum interval between Reddit posts has not elapsed"]);
+  assert.equal(blocked.nextAllowedAt, "2026-09-23T12:05:00.000Z");
+  assert.deepEqual(postingLimitReasons(store, draft.itemId, new Date("2026-09-23T12:06:00.000Z")), { reasons: [], nextAllowedAt: null });
+});
+
+test("community cap is scoped to its subreddit and releases at the oldest claim's 24-hour mark", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 10, perCommunityPerDay: 3, minIntervalMinutes: 0 },
+  });
+  const same = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  const other = seedItem(store, { source: "reddit", externalId: "t1_other", url: "https://www.reddit.com/r/other/comments/new/title/" });
+  claim(store, "post:2026-09-23:reddit:testaha:t1_a", new Date("2026-09-23T10:00:00.000Z"));
+  claim(store, "post:2026-09-23:reddit:testaha:t1_b", new Date("2026-09-23T11:00:00.000Z"));
+  claim(store, "post:2026-09-23:reddit:testaha:t1_c", new Date("2026-09-23T11:30:00.000Z"));
+  assert.deepEqual(postingLimitReasons(store, same.itemId, now), {
+    reasons: ["rolling 24-hour community posting limit reached"],
+    nextAllowedAt: "2026-09-24T10:00:00.000Z",
+  });
+  assert.deepEqual(postingLimitReasons(store, other.itemId, now), { reasons: [], nextAllowedAt: null });
+});
+
+test("community limit release accounts for claims above the configured limit", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 10, perCommunityPerDay: 2, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  for (const [index, hour] of [8, 9, 10, 11].entries()) {
+    claim(store, `post:2026-09-23:reddit:testaha:t1_history${index}`, new Date(`2026-09-23T${String(hour).padStart(2, "0")}:00:00.000Z`));
+  }
+  const result = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(result.reasons, ["rolling 24-hour community posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T10:00:00.000Z");
+});
+
+test("legacy counted ledger rows without claimed_at are included conservatively", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 1, perCommunityPerDay: 10, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES ('post:2026-09-23:reddit:testaha:t1_legacy', 'posted', NULL)").run();
+  const result = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(result.reasons, ["rolling 24-hour posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T12:00:00.000Z");
+});
+
+test("ready reservations record their claimed timestamp", async t => {
+  const store = await policyHome(t);
+  const draft = seedItem(store);
+  recordReady(store, draft, now);
+  const row = store.db.prepare("SELECT state, claimed_at AS claimedAt FROM ledger WHERE key LIKE 'post:2026-09-23:hn:%'")
+    .get() as { state: string; claimedAt: string | null };
+  assert.deepEqual({ ...row }, { state: "ready", claimedAt: now.toISOString() });
 });
 
 test("response policy rule 5 fails only when the community daily limit is full", async t => {

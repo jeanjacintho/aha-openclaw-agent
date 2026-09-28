@@ -46,10 +46,10 @@ function setLedger(store: Store, key: string, state: string, url: string | null)
   store.db.prepare("UPDATE ledger SET state = ?, url = ? WHERE key = ?").run(state, url, key);
 }
 
-function takeKey(store: Store, key: string, url: string | null) {
-  const inserted = store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posting', ?) ON CONFLICT (key) DO NOTHING").run(key, url);
+function takeKey(store: Store, key: string, url: string | null, claimedAt: string) {
+  const inserted = store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'posting', ?, ?) ON CONFLICT (key) DO NOTHING").run(key, url, claimedAt);
   if (inserted.changes === 1) return true;
-  const stolen = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state IN ('ready', 'failed')").run(url, key);
+  const stolen = store.db.prepare("UPDATE ledger SET state = 'posting', url = ?, claimed_at = ? WHERE key = ? AND state IN ('ready', 'failed')").run(url, claimedAt, key);
   return stolen.changes === 1;
 }
 
@@ -59,7 +59,7 @@ function freezePosting(store: Store, key: string, url: string | null) {
 
 type PostClaimResult = PostResult | "owned" | "already_posted" | "already_absent" | "retry_refused" | "thread_taken";
 
-function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostClaimResult {
+function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null, claimedAt: string): PostClaimResult {
   return store.tx(() => {
     const post = ledgerState(store, postKey);
     const thread = ledgerState(store, threadKey);
@@ -74,7 +74,7 @@ function claimKeys(store: Store, postKey: string, threadKey: string, url: string
     if (post?.state === "uncertain" || thread?.state === "uncertain") return "uncertain";
     const threadReadyForeign = thread?.state === "ready" && post?.state !== "ready" && post?.state !== "failed";
     if (threadReadyForeign) return "thread_taken";
-    if (!takeKey(store, postKey, url) || !takeKey(store, threadKey, url)) {
+    if (!takeKey(store, postKey, url, claimedAt) || !takeKey(store, threadKey, url, claimedAt)) {
       freezePosting(store, postKey, url);
       freezePosting(store, threadKey, url);
       const currentPost = ledgerState(store, postKey)?.state;
@@ -108,23 +108,23 @@ function claimAbsentRetry(store: Store, claim: RetryClaim): PostClaimResult {
     if (store.db.prepare("SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'retried' LIMIT 1").get(claim.draftId)) {
       return "retry_refused";
     }
-    if (postingPaused(store) || postingLimitReasons(store, claim.itemId, new Date(claim.approvedAt)).length > 0) return "retry_refused";
+    if (postingPaused(store) || postingLimitReasons(store, claim.itemId, new Date(claim.approvedAt)).reasons.length > 0) return "retry_refused";
     if (claim.retryPostKey !== claim.originalPostKey && ledgerState(store, claim.retryPostKey)) return "retry_refused";
     const draftUpdate = store.db.prepare(`UPDATE drafts SET approved_at = ?
       WHERE id = ? AND state = 'approved' AND body = ? AND approved_sha256 = ?`)
       .run(claim.approvedAt, claim.draftId, claim.body, claim.approvedSha256);
     if (draftUpdate.changes !== 1) return "retry_refused";
     if (claim.retryPostKey === claim.originalPostKey) {
-      const postUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state = 'absent'")
-        .run(claim.url, claim.originalPostKey);
+      const postUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ?, claimed_at = ? WHERE key = ? AND state = 'absent'")
+        .run(claim.url, claim.approvedAt, claim.originalPostKey);
       if (postUpdate.changes !== 1) throw new Error("absent post key changed during retry claim");
     } else {
-      const inserted = store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posting', ?)")
-        .run(claim.retryPostKey, claim.url);
+      const inserted = store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'posting', ?, ?)")
+        .run(claim.retryPostKey, claim.url, claim.approvedAt);
       if (inserted.changes !== 1) throw new Error("retry post key could not be claimed");
     }
-    const threadUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state = 'absent'")
-      .run(claim.url, claim.threadKey);
+    const threadUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ?, claimed_at = ? WHERE key = ? AND state = 'absent'")
+      .run(claim.url, claim.approvedAt, claim.threadKey);
     if (threadUpdate.changes !== 1) throw new Error("absent thread key changed during retry claim");
     recordDraftEvent(store, {
       draftId: claim.draftId,
@@ -288,7 +288,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
       originalPostKey, retryPostKey: key, threadKey: thread, url: item.url, draftId: draft.id,
       itemId: draft.itemId, body: draft.body, approvedSha256: draft.approvedSha256!, approvedAt: now.toISOString(), actor: retryActor,
     })
-    : claimKeys(store, key, thread, item.url);
+    : claimKeys(store, key, thread, item.url, now.toISOString());
   if (claimed !== "owned") {
     if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     if (claimed === "already_posted") {

@@ -16,6 +16,11 @@ export type AhaConfig = {
   agentIndexSlug?: string;
   roleChats?: Partial<Record<Role, string>>;
   tokenBudget?: number;
+  postingLimits?: {
+    perDay?: number;
+    perCommunityPerDay?: number;
+    minIntervalMinutes?: number;
+  };
 };
 
 function assertConfig(config: AhaConfig) {
@@ -27,6 +32,22 @@ function assertConfig(config: AhaConfig) {
     } catch {
       throw new Error("config tz is not a valid IANA timezone");
     }
+  }
+  if (config.postingLimits !== undefined) {
+    const limits = config.postingLimits;
+    if (!limits || typeof limits !== "object" || Array.isArray(limits)) throw new Error("config postingLimits must be an object");
+    const ranges = {
+      perDay: [1, 50],
+      perCommunityPerDay: [1, 10],
+      minIntervalMinutes: [0, 720],
+    } as const;
+    for (const [key, [min, max]] of Object.entries(ranges) as [keyof typeof ranges, readonly [number, number]][]) {
+      const value = limits[key];
+      if (value !== undefined && (!Number.isInteger(value) || value < min || value > max)) {
+        throw new Error(`config postingLimits.${key} must be an integer from ${min} to ${max}`);
+      }
+    }
+    if (Object.keys(limits).some(key => !(key in ranges))) throw new Error("config postingLimits contains an unknown field");
   }
 }
 

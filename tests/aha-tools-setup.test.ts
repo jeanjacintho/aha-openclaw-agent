@@ -448,6 +448,34 @@ test("aha_setup_save args override recorded answers", async t => {
   assert.deepEqual(getConfig(store)?.company.aliases, ["plow.co"]);
 });
 
+test("aha_setup_save accepts posting limits and merges later partial changes", async t => {
+  const dir = await home(t);
+  const map = tools(ownerDm);
+  const initial = await map.get("aha_setup_save")!.execute("call", {
+    company: "Plow", postingLimits: { perDay: 6, minIntervalMinutes: 0 },
+  });
+  assert.equal(initial.isError ?? false, false);
+  const changed = await map.get("aha_setup_save")!.execute("call", {
+    postingLimits: { perCommunityPerDay: 2 },
+  });
+  assert.equal(changed.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.deepEqual(getConfig(store)?.postingLimits, { perDay: 6, perCommunityPerDay: 2, minIntervalMinutes: 0 });
+});
+
+test("aha_setup_save refuses invalid posting limit values", async t => {
+  const dir = await home(t);
+  const result = await tools(ownerDm).get("aha_setup_save")!.execute("call", {
+    company: "Plow", postingLimits: { perDay: 51 },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /postingLimits\.perDay must be an integer from 1 to 50/);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(getConfig(store), null);
+});
+
 test("aha_setup_save normalizes source aliases from direct arguments", async t => {
   const dir = await home(t);
   const result = await tools(ownerDm).get("aha_setup_save")!.execute("call", {
