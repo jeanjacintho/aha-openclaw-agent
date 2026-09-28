@@ -7,6 +7,7 @@ import { saveConfig } from "../aha/config.ts";
 import { classifyNewItems } from "../aha/digest/deliver.ts";
 import { draftAndNotify, draftReply, notifyExpiredDrafts, validateReply } from "../aha/responder/drafts.ts";
 import { runIngest } from "../aha/pipeline/ingest.ts";
+import { runBackfill } from "../aha/pipeline/backfill.ts";
 import { openStore } from "../aha/store/db.ts";
 import { RETENTION_DAYS, ForgetError, forgetByUrlOrAuthor, pruneExpired } from "../aha/store/retention.ts";
 import { checkPolicy } from "../aha/responder/policy.ts";
@@ -301,6 +302,52 @@ test("forget audit hashes use a local HMAC secret, not raw sha256", async t => {
   assert.notEqual(hash, raw);
   const secret = (await fs.readFile(path.join(process.env.AHA_HOME!, "forget.key"), "utf8")).trim();
   assert.equal(hash, createHmac("sha256", secret).update("author:hn:mallory").digest("hex"));
+});
+
+test("ingest permanently skips forgotten URLs and authors but accepts other candidates", async t => {
+  const store = await home(t);
+  assert.equal(forgetByUrlOrAuthor(store, "https://news.ycombinator.com/item?id=forgot-url"), 0);
+  assert.equal(forgetByUrlOrAuthor(store, "hn:alice"), 0);
+  const adapter: SourceAdapter = {
+    id: "hn",
+    enabled: () => true,
+    async fetch() {
+      return {
+        ok: true,
+        items: [
+          { source: "hn", externalId: "forgot-url", url: "http://www.news.ycombinator.com/item?id=forgot-url/", author: "bob", title: "Plow question", body: "plow", publishedAt: "2026-09-23T11:00:00.000Z" },
+          { source: "hn", externalId: "alice-new-post", url: "https://news.ycombinator.com/item?id=alice-new", author: "@Alice", title: "Plow question", body: "plow", publishedAt: "2026-09-23T11:00:00.000Z" },
+          { source: "hn", externalId: "other-author", url: "https://news.ycombinator.com/item?id=other", author: "carol", title: "Plow question", body: "plow", publishedAt: "2026-09-23T11:00:00.000Z" },
+        ],
+        nextCursor: null,
+      };
+    },
+  };
+  const report = await runIngest(store, [adapter], new Date("2026-09-23T12:00:00.000Z"));
+  assert.equal(report.sources[0].stored, 1);
+  assert.deepEqual(
+    (store.db.prepare("SELECT external_id FROM items ORDER BY external_id").all() as { external_id: string }[]).map(row => row.external_id),
+    ["other-author"],
+  );
+});
+
+test("backfill also skips items forgotten by author", async t => {
+  const store = await home(t);
+  forgetByUrlOrAuthor(store, "reddit:removed-user");
+  const adapter: SourceAdapter = {
+    id: "reddit",
+    enabled: () => true,
+    async fetch() {
+      return {
+        ok: true,
+        items: [{ source: "reddit", externalId: "old-post", url: "https://reddit.com/r/plow/comments/old", author: "u/Removed-User", title: "Plow question", body: "plow", publishedAt: "2026-09-21T12:00:00.000Z" }],
+        nextCursor: null,
+      };
+    },
+  };
+  const report = await runBackfill(store, [adapter], 30, new Date("2026-09-23T12:00:00.000Z"));
+  assert.equal(report.sources[0].stored, 0);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n, 0);
 });
 
 test("a redacted pending draft is expired, not approvable, and the role group is notified", async t => {
