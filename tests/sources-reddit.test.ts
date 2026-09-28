@@ -48,3 +48,31 @@ test("Reddit HTTP 429 is rate_limited", async () => {
   });
   assert.deepEqual(await source.fetch(query, null), { ok: false, error: "rate_limited", retryAfterMs: 2000 });
 });
+
+test("Reddit stops paging a term after the oldest result passes since and continues with the next term", async () => {
+  const calls: string[] = [];
+  const source = redditSource({
+    token: "tok",
+    fetch: async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("q=Plow")) return Response.json({ data: { after: "t3_older", children: [
+        { kind: "t1", data: { id: "recent", name: "t1_recent", author: "a", body: "recent", created_utc: 1790035200, permalink: "/r/test/comments/x/recent" } },
+        { kind: "t1", data: { id: "old", name: "t1_old", author: "a", body: "old", created_utc: 1789862400, permalink: "/r/test/comments/x/old" } },
+      ] } });
+      return Response.json({ data: { after: null, children: [] } });
+    },
+  });
+  const multiTermQuery = { ...query, terms: ["Plow", "queues"] };
+  const first = await source.fetch(multiTermQuery, null);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.deepEqual(first.items.map(item => item.externalId), ["t1_recent"]);
+  assert.deepEqual(JSON.parse(first.nextCursor!), { i: 1, after: null });
+  const second = await source.fetch(multiTermQuery, first.nextCursor);
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.nextCursor, null);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /q=queues/);
+});
