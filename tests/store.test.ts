@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { getConfig, saveConfig } from "../aha/config.ts";
+import { postingLimitReasons } from "../aha/responder/policy.ts";
 import { readSecrets, writeSecrets } from "../aha/secrets.ts";
 import { openStore } from "../aha/store/db.ts";
 
@@ -92,7 +93,41 @@ test("migration adds origin to an existing database and defaults old rows to liv
   assert.equal((migrated.db.prepare("SELECT approved_sha256 FROM drafts WHERE item_id = (SELECT id FROM items WHERE external_id = 'old-row') AND state = 'pending'").get() as { approved_sha256: string | null }).approved_sha256, null);
 });
 
-test("migration gives old counted post reservations a conservative claimed_at", async t => {
+test("claimed_at migration uses ledger-key dates instead of making old posts recent", async t => {
+  const dir = await home(t);
+  const migrationDir = new URL("../aha/store/migrations/", import.meta.url);
+  const before018 = (await fs.readdir(migrationDir))
+    .filter(name => /^\d+_.*\.sql$/.test(name) && name < "018_ledger_claimed_at.sql")
+    .sort();
+  const sql = await Promise.all(before018.map(name => fs.readFile(new URL(name, migrationDir), "utf8")));
+  const prior = openStore(dir, sql);
+  const today = new Date().toISOString().slice(0, 10);
+  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  for (let index = 0; index < 12; index++) {
+    prior.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posted', NULL)")
+      .run(`post:${tenDaysAgo}:reddit:history:t3_old${index}`);
+  }
+  prior.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posted', NULL)")
+    .run(`post:${today}:hn:history:old-today`);
+  prior.close();
+
+  const migrated = openStore(dir);
+  t.after(() => migrated.close());
+  const oldRows = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key LIKE ? ORDER BY key")
+    .all(`post:${tenDaysAgo}:%`) as { claimedAt: string }[];
+  assert.equal(oldRows.length, 12);
+  assert.deepEqual(new Set(oldRows.map(row => row.claimedAt)), new Set([`${tenDaysAgo}T23:59:59.999Z`]));
+  const todayRow = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key = ?")
+    .get(`post:${today}:hn:history:old-today`) as { claimedAt: string };
+  assert.equal(todayRow.claimedAt, `${today}T23:59:59.999Z`);
+
+  saveConfig(migrated, { company: { name: "Plow", aliases: ["plow"] }, links: [] });
+  migrated.db.prepare(`INSERT INTO items (source, external_id, state) VALUES ('hn', 'new-after-migration', 'relevant')`).run();
+  const itemId = Number((migrated.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  assert.deepEqual(postingLimitReasons(migrated, itemId, new Date()), { reasons: [], nextAllowedAt: null });
+});
+
+test("migration derives conservative claimed_at from the ledger key date", async t => {
   const dir = await home(t);
   const migrationDir = new URL("../aha/store/migrations/", import.meta.url);
   const before018 = (await fs.readdir(migrationDir))
@@ -100,12 +135,17 @@ test("migration gives old counted post reservations a conservative claimed_at", 
   const sql = await Promise.all(before018.map(name => fs.readFile(new URL(name, migrationDir), "utf8")));
   const old = openStore(dir, sql);
   old.db.prepare("INSERT INTO ledger (key, state, url) VALUES ('post:2026-09-22:reddit:testaha:t3_old', 'posted', NULL)").run();
+  old.db.prepare("INSERT INTO ledger (key, state, url) VALUES ('post:not-a-date:reddit:testaha:t3_bad-date', 'posted', NULL)").run();
   old.close();
   const migrated = openStore(dir);
   t.after(() => migrated.close());
   const row = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key LIKE 'post:%'").get() as { claimedAt: string | null };
   assert.ok(row.claimedAt);
-  assert.ok(Math.abs(Date.now() - Date.parse(row.claimedAt!)) < 60_000);
+  const dated = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key LIKE '%t3_old'").get() as { claimedAt: string | null };
+  assert.equal(dated.claimedAt, "2026-09-22T23:59:59.999Z");
+  const fallback = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key LIKE '%t3_bad-date'").get() as { claimedAt: string | null };
+  assert.ok(fallback.claimedAt);
+  assert.ok(Math.abs(Date.now() - Date.parse(fallback.claimedAt!)) < 60_000);
 });
 
 test("a duplicate source and external id is rejected", async t => {

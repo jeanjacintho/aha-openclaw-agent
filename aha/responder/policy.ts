@@ -94,11 +94,11 @@ export function postingLimitReasons(store: Store, itemId: number, now: Date): Po
   const releaseTimes: number[] = [];
   if (totalTimes.length >= limits.perDay) {
     reasons.push("rolling 24-hour posting limit reached");
-    releaseTimes.push(totalTimes[0] + DAY_MS);
+    releaseTimes.push(totalTimes[totalTimes.length - limits.perDay] + DAY_MS);
   }
   if (communityTimes.length >= limits.perCommunityPerDay) {
     reasons.push("rolling 24-hour community posting limit reached");
-    releaseTimes.push(communityTimes[0] + DAY_MS);
+    releaseTimes.push(communityTimes[communityTimes.length - limits.perCommunityPerDay] + DAY_MS);
   }
   if (limits.minIntervalMinutes > 0 && redditTimes.length > 0) {
     const releaseAt = redditTimes[redditTimes.length - 1] + limits.minIntervalMinutes * 60_000;

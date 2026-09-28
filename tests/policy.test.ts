@@ -234,6 +234,22 @@ test("rolling 24-hour total blocks a 23:59 to 00:01 burst and reports release ti
   assert.equal(result.nextAllowedAt, "2026-09-24T23:59:00.000Z");
 });
 
+test("total limit release accounts for claims above the configured limit", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 2, perCommunityPerDay: 10, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "hn", externalId: "new-total-limit" });
+  for (const [index, hour] of [8, 9, 10, 11].entries()) {
+    claim(store, `post:2026-09-23:hn:history-${index}`, new Date(`2026-09-23T${String(hour).padStart(2, "0")}:00:00.000Z`));
+  }
+  const result = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(result.reasons, ["rolling 24-hour posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T10:00:00.000Z");
+});
+
 test("minimum Reddit interval blocks a second post and clears at the reported time", async t => {
   const store = await policyHome(t);
   saveConfig(store, {
@@ -266,6 +282,22 @@ test("community cap is scoped to its subreddit and releases at the oldest claim'
     nextAllowedAt: "2026-09-24T10:00:00.000Z",
   });
   assert.deepEqual(postingLimitReasons(store, other.itemId, now), { reasons: [], nextAllowedAt: null });
+});
+
+test("community limit release accounts for claims above the configured limit", async t => {
+  const store = await policyHome(t);
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    links: ["https://news.ycombinator.com/item?id=1"],
+    postingLimits: { perDay: 10, perCommunityPerDay: 2, minIntervalMinutes: 0 },
+  });
+  const draft = seedItem(store, { source: "reddit", externalId: "t1_new", url: "https://www.reddit.com/r/testaha/comments/new/title/" });
+  for (const [index, hour] of [8, 9, 10, 11].entries()) {
+    claim(store, `post:2026-09-23:reddit:testaha:t1_history${index}`, new Date(`2026-09-23T${String(hour).padStart(2, "0")}:00:00.000Z`));
+  }
+  const result = postingLimitReasons(store, draft.itemId, now);
+  assert.deepEqual(result.reasons, ["rolling 24-hour community posting limit reached"]);
+  assert.equal(result.nextAllowedAt, "2026-09-24T10:00:00.000Z");
 });
 
 test("legacy counted ledger rows without claimed_at are included conservatively", async t => {
