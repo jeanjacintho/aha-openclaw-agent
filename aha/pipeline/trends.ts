@@ -36,8 +36,10 @@ function sourceName(source: string) {
 }
 
 function rangeSources(store: Store, start: Date, end: Date) {
+  // Site-watch health is independent of content-source coverage. Sources that
+  // never succeed in this lookback cannot make every weekly count unknown.
   return (store.db.prepare(
-    "SELECT DISTINCT source FROM source_runs WHERE window_end > ? AND window_start < ?",
+    "SELECT DISTINCT source FROM source_runs WHERE window_end > ? AND window_start < ? AND status = 'ok' AND source <> 'site'",
   ).all(start.toISOString(), end.toISOString()) as { source: string }[]).map(row => row.source);
 }
 
@@ -47,7 +49,7 @@ function weekKnown(store: Store, start: Date, end: Date, expected: string[]) {
     "SELECT source, status FROM source_runs WHERE window_end > ? AND window_start < ?",
   ).all(start.toISOString(), end.toISOString()) as { source: string; status: string }[];
   const ok = new Set(rows.filter(row => row.status === "ok").map(row => row.source));
-  return expected.some(source => ok.has(source));
+  return expected.every(source => ok.has(source));
 }
 
 type Hit = { source: string; topic: string; state: string; about: string | null };
