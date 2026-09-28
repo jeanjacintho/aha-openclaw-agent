@@ -146,6 +146,10 @@ function recordDraftFailure(store: Store, itemId: number, error: unknown) {
     .run(message.slice(0, 200), itemId);
 }
 
+function isActiveDraftConflict(error: unknown) {
+  return error instanceof Error && error.message.includes("UNIQUE constraint failed: drafts.item_id");
+}
+
 export async function notifyExpiredDrafts(store: Store, itemIds: number[], deps: DraftDeps = {}) {
   if (!itemIds.length) return;
   const cfg = getConfig(store);
@@ -197,6 +201,7 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
       const text = `Rascunho AHA-${row.id}\n${draft.body}${row.url ? `\n${row.url}` : ""}`;
       await notifyChats(store, cfg, roles.slice(0, 1), text, "draft", row.id, deps);
     } catch (error) {
+      if (isActiveDraftConflict(error)) continue;
       recordDraftFailure(store, row.id, error);
     }
   }

@@ -151,7 +151,7 @@ test("AHA-n always names the item, not a draft with the same number", async t =>
   const decoy = seed(dir, { category: "praise" });
   const pad = openStore(dir);
   for (let i = 0; i < 8; i++) {
-    pad.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, 'padding', 'pending')").run(decoy.itemId);
+    pad.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, 'padding', 'expired')").run(decoy.itemId);
   }
   pad.close();
   const target = seed(dir, { category: "question" });
@@ -166,7 +166,7 @@ test("AHA-n always names the item, not a draft with the same number", async t =>
   const after = openStore(dir);
   t.after(() => after.close());
   assert.equal((after.db.prepare("SELECT state FROM drafts WHERE id = ?").get(target.draftId) as { state: string }).state, "approved");
-  assert.equal((after.db.prepare("SELECT state FROM drafts WHERE id = ?").get(target.itemId) as { state: string }).state, "pending");
+  assert.equal((after.db.prepare("SELECT state FROM drafts WHERE id = ?").get(target.itemId) as { state: string }).state, "expired");
 });
 
 test("a second approve on the same draft is rejected", async t => {

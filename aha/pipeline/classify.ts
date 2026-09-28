@@ -12,6 +12,7 @@ export const MAX_CLASSIFY_ATTEMPTS = 3;
 // Persistent provider/network failures also need a finite path out of the queue.
 export const MAX_CLASSIFY_TRANSPORT_ATTEMPTS = 10;
 export const CLASSIFY_TRANSPORT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const CLASSIFY_LEASE_MS = 2 * 60 * 1000;
 
 export type ItemRow = {
   id: number;
@@ -27,6 +28,7 @@ export type ItemRow = {
   state: string;
   classify_attempts?: number;
   classify_transport_attempts?: number;
+  classify_claimed_until?: string | null;
 };
 
 export type ClassifyReport = {
@@ -59,25 +61,37 @@ function aboutAllowed(about: Classification["about"], cfg: AhaConfig) {
   return (cfg.competitors ?? []).some(name => name.toLowerCase() === slug);
 }
 
-function review(store: Store, id: number) {
-  store.db.prepare("UPDATE items SET state = 'needs_review', classify_attempts = classify_attempts + 1 WHERE id = ?").run(id);
+function ownership(item: ItemRow) {
+  return item.classify_claimed_until
+    ? { sql: "classify_claimed_until = ?", args: [item.classify_claimed_until] }
+    : { sql: "classify_claimed_until IS NULL", args: [] };
 }
 
-function recordTransportFailure(store: Store, id: number, now: Date) {
+function review(store: Store, item: ItemRow) {
+  const guard = ownership(item);
+  return store.db.prepare(`UPDATE items SET state = 'needs_review', classify_attempts = classify_attempts + 1
+    WHERE id = ? AND ${guard.sql}`).run(item.id, ...guard.args).changes > 0;
+}
+
+function recordTransportFailure(store: Store, item: ItemRow, now: Date) {
   const staleBefore = new Date(now.getTime() - CLASSIFY_TRANSPORT_MAX_AGE_MS).toISOString();
+  const guard = ownership(item);
   const row = store.db.prepare(`UPDATE items SET
       classify_transport_attempts = MIN(classify_transport_attempts + 1, ?),
       state = CASE WHEN classify_transport_attempts + 1 >= ? AND fetched_at <= ? THEN 'needs_review' ELSE state END
-    WHERE id = ? RETURNING classify_transport_attempts, fetched_at`).get(
-    MAX_CLASSIFY_TRANSPORT_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, staleBefore, id,
+    WHERE id = ? AND ${guard.sql} RETURNING classify_transport_attempts, fetched_at`).get(
+    MAX_CLASSIFY_TRANSPORT_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, staleBefore, item.id, ...guard.args,
   ) as { classify_transport_attempts: number; fetched_at: string | null } | undefined;
   return (row?.classify_transport_attempts ?? 0) >= MAX_CLASSIFY_TRANSPORT_ATTEMPTS
     && row?.fetched_at !== null && row?.fetched_at !== undefined && row.fetched_at <= staleBefore;
 }
 
-function save(store: Store, id: number, c: Classification) {
+function save(store: Store, item: ItemRow, c: Classification) {
+  const guard = ownership(item);
   const topic = topicLabel(store, assignTopic(store, c.topic));
-  store.db.prepare("UPDATE items SET state = ? WHERE id = ?").run(stateFromClassification(c), id);
+  const changed = store.db.prepare(`UPDATE items SET state = ? WHERE id = ? AND ${guard.sql}`)
+    .run(stateFromClassification(c), item.id, ...guard.args).changes;
+  if (!changed) return false;
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (item_id) DO UPDATE SET
@@ -89,19 +103,18 @@ function save(store: Store, id: number, c: Classification) {
       urgency = excluded.urgency,
       about = excluded.about,
       confidence = excluded.confidence`).run(
-    id, c.sentiment, c.category, topic, c.lang, c.isQuestion ? 1 : 0, c.urgency, c.about, c.confidence,
+    item.id, c.sentiment, c.category, topic, c.lang, c.isQuestion ? 1 : 0, c.urgency, c.about, c.confidence,
   );
+  return true;
 }
 
-export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDeps = {}): Promise<ClassifyReport> {
-  const batch = items.slice(0, CLASSIFY_BATCH_SIZE);
+async function classifyBatchOwned(s: Store, batch: ItemRow[], deps: ClassifyDeps): Promise<ClassifyReport> {
   const report: ClassifyReport = { classified: 0, needsReview: 0 };
   if (batch.length === 0) return report;
   const cfg = getConfig(s);
   if (!cfg) {
     for (const item of batch) {
-      review(s, item.id);
-      report.needsReview += 1;
+      if (review(s, item)) report.needsReview += 1;
     }
     return report;
   }
@@ -116,7 +129,7 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     let exhausted = 0;
     const attemptedAt = (deps.now ?? (() => new Date()))();
     for (const item of batch) {
-      if (recordTransportFailure(s, item.id, attemptedAt)) {
+      if (recordTransportFailure(s, item, attemptedAt)) {
         exhausted += 1;
         report.needsReview += 1;
       }
@@ -128,7 +141,8 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     return report;
   }
   for (const item of batch) {
-    s.db.prepare("UPDATE items SET classify_transport_attempts = 0 WHERE id = ?").run(item.id);
+    const guard = ownership(item);
+    s.db.prepare(`UPDATE items SET classify_transport_attempts = 0 WHERE id = ? AND ${guard.sql}`).run(item.id, ...guard.args);
   }
   const byId = new Map<number, Classification>();
   let rejected: string | undefined;
@@ -149,16 +163,27 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
   for (const item of batch) {
     const parsed = byId.get(item.id);
     if (!parsed) {
-      review(s, item.id);
-      report.needsReview += 1;
+      if (review(s, item)) report.needsReview += 1;
       continue;
     }
-    save(s, item.id, parsed);
-    report.classified += 1;
+    if (save(s, item, parsed)) report.classified += 1;
   }
   if (report.needsReview > 0) {
     const why = result.ok ? rejected ?? "missing from model output" : result.reason;
     console.error(`aha: classify sent ${report.needsReview}/${batch.length} items to needs_review: ${why}`);
   }
   return report;
+}
+
+export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDeps = {}): Promise<ClassifyReport> {
+  const batch = items.slice(0, CLASSIFY_BATCH_SIZE);
+  try {
+    return await classifyBatchOwned(s, batch, deps);
+  } finally {
+    for (const item of batch) {
+      if (!item.classify_claimed_until) continue;
+      s.db.prepare("UPDATE items SET classify_claimed_until = NULL WHERE id = ? AND classify_claimed_until = ?")
+        .run(item.id, item.classify_claimed_until);
+    }
+  }
 }
