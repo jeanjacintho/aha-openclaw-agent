@@ -114,9 +114,13 @@ export function redditSource(opts: { fetch?: typeof fetch; token?: string; auth?
           const item = inWindow(created, query) ? toItem(child) : undefined;
           return item ? [item] : [];
         });
+        // Reddit sorts search results newest first. Once this page reaches past
+        // the lower bound, later pages for this term cannot add in-window items.
+        const oldest = children[children.length - 1]?.data?.created_utc;
+        const pastWindow = oldest !== undefined && oldest * 1000 < query.since.getTime();
         const after = payload.data?.after ?? null;
         let next: Cursor | null = null;
-        if (after) next = { i: boundedIndex, after };
+        if (after && !pastWindow) next = { i: boundedIndex, after };
         else if (boundedIndex + 1 < terms.length) next = { i: boundedIndex + 1, after: null };
         return { ok: true, items, nextCursor: next ? JSON.stringify(next) : null };
       } catch {
