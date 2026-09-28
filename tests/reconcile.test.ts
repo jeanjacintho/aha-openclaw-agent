@@ -134,6 +134,21 @@ test("an uncertain Reddit post found in the user's comments becomes verified and
   assert.equal(fetch.messages.length, 1);
 });
 
+test("a found post after retry uses a distinct owner-notice key", async t => {
+  const { store, posts, attemptAt } = await fixture(t);
+  const post = posts[0];
+  recordDraftEvent(store, { draftId: post.draftId, itemId: post.itemId, actor: "owner", action: "retried", body: BODY, at: NOW });
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at, body)
+    VALUES (?, 'cht_dm', 'sent', 'original_notice', ?, ?, NULL)`)
+    .run(`reddit-reconcile:found:${post.postKey}`, NOW.toISOString(), NOW.toISOString());
+  const fetch = makeFetcher(() => jsonListing([commentFor(post, attemptAt.getTime() + 60_000)]));
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 1, reconciled: 1, absent: 0, expired: 0 });
+  assert.equal(fetch.messages.length, 1);
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`reddit-reconcile:found:${post.postKey}`) as { status: string }).status, "sent");
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`reddit-reconcile:found-after-retry:${post.postKey}`) as { status: string }).status, "sent");
+});
+
 test("a comment created before the uncertain event but after approval is still found", async t => {
   const { store, posts, attemptAt } = await fixture(t, { uncertainDelayMs: 30_000 });
   const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 10_000)]));

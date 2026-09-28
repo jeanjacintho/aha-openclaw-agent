@@ -186,7 +186,7 @@ async function verify(
   return { status: "verified" };
 }
 
-async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps) {
+async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps, isRetry = false) {
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
   const lang = getConfig(store)?.language || "en";
@@ -194,7 +194,7 @@ async function notifyUncertain(store: Store, itemId: number, key: string, deps: 
     ? `Post incerto AHA-${itemId}. Vou conferir automaticamente e aviso você quando houver uma confirmação.`
     : `Uncertain Reddit post for AHA-${itemId}. I will check automatically and let you know when it is resolved.`;
   try {
-    await sendToChat(owner, text, `uncertain:${key}`, { store, fetch: deps.fetch, now: deps.now });
+    await sendToChat(owner, text, `${isRetry ? "uncertain-retry" : "uncertain"}:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
     /* unit tests may omit Plow env */
   }
@@ -207,6 +207,7 @@ async function notifyVerificationMismatch(
   detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed",
   url: string | null,
   deps: PostDeps,
+  isRetry = false,
 ) {
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
@@ -221,7 +222,7 @@ async function notifyVerificationMismatch(
     ? `Verificação do post AHA-${itemId}: ${reason.pt}. Confira: ${url ?? "link indisponível"}`
     : `AHA-${itemId} post verification: ${reason.en}. Check: ${url ?? "link unavailable"}`;
   try {
-    await sendToChat(owner, text, `verify:${key}`, { store, fetch: deps.fetch, now: deps.now });
+    await sendToChat(owner, text, `${isRetry ? "verify-retry" : "verify"}:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
     /* unit tests may omit Plow env */
   }
@@ -289,7 +290,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
     })
     : claimKeys(store, key, thread, item.url);
   if (claimed !== "owned") {
-    if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     if (claimed === "already_posted") {
       event("post_refused", "already_posted");
       return "posted";
@@ -335,7 +336,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
     }
     finish(store, key, thread, "uncertain", item.url);
     event("uncertain", "network_error");
-    await notifyUncertain(store, draft.itemId, key, deps);
+    await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return "uncertain";
   }
   if (response.status === 401 || response.status === 403) {
@@ -347,7 +348,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
     const next = response.status >= 500 ? "uncertain" : "failed";
     finish(store, key, thread, next, item.url);
     event(next, `http_${response.status}`);
-    if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return next;
   }
   let parsed: { id: string; permalink?: string } | undefined;
@@ -356,7 +357,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
   } catch {
     finish(store, key, thread, "uncertain", item.url);
     event("uncertain", "response_invalid");
-    await notifyUncertain(store, draft.itemId, key, deps);
+    await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return "uncertain";
   }
   if (!parsed) {
@@ -382,7 +383,7 @@ async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, 
     event("verified");
   } else if (verification.status === "mismatch") {
     event("verify_mismatch", verification.detail);
-    await notifyVerificationMismatch(store, draft.itemId, key, verification.detail, postedUrl, deps);
+    await notifyVerificationMismatch(store, draft.itemId, key, verification.detail, postedUrl, deps, Boolean(retryActor));
   } else {
     event("verify_unavailable", "verify_unavailable");
   }

@@ -157,7 +157,7 @@ async function notifyResolution(store: Store, post: PendingPost, outcome: "found
   const lang = getConfig(store)?.language || "en";
   const retried = Boolean(store.db.prepare("SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'retried' LIMIT 1")
     .get(post.draftId));
-  const noticeKey = outcome === "absent" && retried ? "absent-after-retry" : outcome;
+  const noticeKey = retried ? `${outcome}-after-retry` : outcome;
   const text = outcome === "found"
     ? (lang.startsWith("pt")
       ? `Publicação AHA-${post.itemId} confirmada no Reddit: ${url ?? "link indisponível"}`

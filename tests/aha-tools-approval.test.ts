@@ -313,6 +313,37 @@ test("aha_retry posts an absent Reddit approval once and atomically refreshes ap
   assert.deepEqual({ ...retryEvent }, { actor: "mem_retry", action: "retried", body_sha256: createHash("sha256").update(seeded.body).digest("hex") });
 });
 
+test("an uncertain retry notifies the owner even when the original notice used the same day's post key", async t => {
+  const messages: { url: string; body: string }[] = [];
+  const redditPosts: string[] = [];
+  const dir = await home(t, messages, "uncertain", undefined, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  const now = new Date().toISOString();
+  const retryPostKey = postLedgerKey(now.slice(0, 10), "reddit", "t3_thread", seeded.url);
+  const oldNoticeKey = `uncertain:${retryPostKey}`;
+  store.db.prepare("UPDATE drafts SET approved_at = ? WHERE id = ?").run(now, seeded.draftId);
+  store.db.prepare("DELETE FROM ledger WHERE key = ?").run(seeded.postKey);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'absent', ?)").run(retryPostKey, seeded.url);
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at, body)
+    VALUES (?, 'cht_dm', 'sent', 'original_notice', ?, ?, NULL)`).run(oldNoticeKey, now, now);
+  store.close();
+
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.deepEqual(result.details, {
+    sent: false, status: "uncertain", reason: "Reddit outcome is uncertain; reconciliation will check automatically",
+  });
+  assert.equal(redditPosts.length, 1);
+  const notices = messages.filter(message => message.url.includes("/chats/cht_dm/messages") && message.body.includes("Uncertain Reddit post"));
+  assert.equal(notices.length, 1);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  assert.equal((after.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(oldNoticeKey) as { status: string }).status, "sent");
+  assert.equal((after.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`uncertain-retry:${retryPostKey}`) as { status: string }).status, "sent");
+});
+
 test("aha_retry refuses every ledger state except absent for both keys", async t => {
   const dir = await home(t);
   const seeded = seedAbsentRetry(dir);

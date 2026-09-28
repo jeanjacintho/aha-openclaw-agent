@@ -206,8 +206,8 @@ function argsFor(name: string, itemId: number, attack: string): Record<string, u
     case "aha_backfill": return { days: 1 };
     case "aha_role_assign": return { memberUid: "mem_x", role: "marketing" };
     case "aha_ask": return { question: attack };
-    case "aha_approve":
-    case "aha_retry": return { draftId: `AHA-${itemId}` };
+    case "aha_approve": return { draftId: `AHA-${itemId}`, reason: attack };
+    case "aha_retry": return { draftId: `AHA-${itemId}`, reason: attack };
     case "aha_ignore": return { draftId: `AHA-${itemId}`, reason: attack };
     case "aha_edit": return { draftId: `AHA-${itemId}`, text: attack };
     case "aha_complaint":
