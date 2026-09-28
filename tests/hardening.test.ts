@@ -205,6 +205,39 @@ test("items older than 90 days are pruned unless they have a pending draft or ar
   assert.equal((store.db.prepare("SELECT body, state FROM drafts WHERE item_id = ?").get(pendingId) as { body: string; state: string }).state, "expired");
 });
 
+test("forget and retention remove the Reddit thread ledger key linked by permalink", async t => {
+  const store = await home(t);
+  const forgottenId = insertItem(store, {
+    source: "reddit", externalId: "t1_forget", url: "https://www.reddit.com/r/plow/comments/abc/title/forget/",
+  });
+  const expiredId = insertItem(store, {
+    source: "reddit", externalId: "t1_expired", url: "https://www.reddit.com/r/plow/comments/xyz/title/expired/",
+    fetched: "2026-06-01T00:00:00.000Z",
+  });
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', ?)").run(
+    "post:2026-09-23:reddit:plow:t1_forget", "https://www.reddit.com/r/plow/comments/abc/title/forget/",
+  );
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', ?)").run(
+    "thread:reddit:t3_abc", "https://www.reddit.com/r/plow/comments/abc/title/forget/",
+  );
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', ?)").run(
+    "post:2026-06-01:reddit:plow:t1_expired", "https://www.reddit.com/r/plow/comments/xyz/title/expired/",
+  );
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'verified', ?)").run(
+    "thread:reddit:t3_xyz", "https://www.reddit.com/r/plow/comments/xyz/title/expired/",
+  );
+
+  assert.equal(forgetByUrlOrAuthor(store, "https://www.reddit.com/r/plow/comments/abc/title/forget/"), 1);
+  assert.equal(store.db.prepare("SELECT key FROM ledger WHERE key IN ('post:2026-09-23:reddit:plow:t1_forget', 'thread:reddit:t3_abc')").all().length, 0);
+  assert.ok(store.db.prepare("SELECT id FROM items WHERE id = ?").get(expiredId));
+
+  const pruned = pruneExpired(store, new Date("2026-09-23T00:00:00.000Z"));
+  assert.equal(pruned.processed, 1);
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(expiredId), undefined);
+  assert.equal(store.db.prepare("SELECT key FROM ledger WHERE key IN ('post:2026-06-01:reddit:plow:t1_expired', 'thread:reddit:t3_xyz')").all().length, 0);
+  assert.equal(store.db.prepare("SELECT id FROM items WHERE id = ?").get(forgottenId), undefined);
+});
+
 test("forget by url or author removes that post", async t => {
   const store = await home(t);
   const byUrl = insertItem(store, { url: "https://news.ycombinator.com/item?id=77", externalId: "77" });
