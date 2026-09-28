@@ -156,9 +156,34 @@ export function forgetHmacSecret(home = ahaHome()) {
   }
 }
 
+function targetHashValue(value: string, home: string) {
+  return createHmac("sha256", forgetHmacSecret(home)).update(value).digest("hex");
+}
+
 function targetHash(parsed: ReturnType<typeof parseForgetNeedle>, home: string) {
   const value = parsed.kind === "url" ? `url:${parsed.url}` : `author:${parsed.source}:${parsed.handle}`;
-  return createHmac("sha256", forgetHmacSecret(home)).update(value).digest("hex");
+  return targetHashValue(value, home);
+}
+
+export type ForgetCandidate = { url?: string | null; source?: string; author?: string | null };
+
+export function wasForgotten(store: Store, candidate: ForgetCandidate, home = ahaHome()) {
+  const targets: string[] = [];
+  if (candidate.url) {
+    const url = normalizeUrl(candidate.url);
+    if (url) targets.push(`url:${url}`);
+  }
+  if (candidate.source && candidate.author) {
+    const source = sourceOf(candidate.source);
+    const author = normalizeAuthor(candidate.author);
+    if (source && author) targets.push(`author:${source}:${author}`);
+  }
+  if (!targets.length) return false;
+  if (!store.db.prepare("SELECT 1 FROM forget_audit LIMIT 1").get()) return false;
+  const secret = forgetHmacSecret(home);
+  const hashes = targets.map(value => createHmac("sha256", secret).update(value).digest("hex"));
+  const placeholders = hashes.map(() => "?").join(", ");
+  return Boolean(store.db.prepare(`SELECT 1 FROM forget_audit WHERE target_hash IN (${placeholders}) LIMIT 1`).get(...hashes));
 }
 
 function purgeDeletedBytes(store: Store) {

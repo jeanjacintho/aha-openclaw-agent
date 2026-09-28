@@ -1,5 +1,6 @@
 import { getConfig, type AhaConfig } from "../config.ts";
 import { type Store } from "../store/db.ts";
+import { wasForgotten } from "../store/retention.ts";
 import { type RawItem, type SourceAdapter, type SourceQuery } from "../sources/types.ts";
 
 export type IngestReport = {
@@ -106,7 +107,7 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
           break;
         }
         for (const item of result.items) {
-          if (!passesFilter1(item, cfg)) continue;
+          if (!passesFilter1(item, cfg) || wasForgotten(store, item)) continue;
           const publishedAt = Date.parse(item.publishedAt);
           const origin = window && (!Number.isFinite(publishedAt) || publishedAt < now.getTime() - DAY_MS)
             ? "backfill"
