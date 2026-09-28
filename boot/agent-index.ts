@@ -68,29 +68,36 @@ export function startAgentIndex(interval = 300_000, state = "/var/lib/plow", wri
   const python = (args: string[], token?: string) => run("python3", [CLIENT, ...args], {
     PATH: process.env.PATH!, HOME: "/var/lib/plow", AGENT_ID: agent, PLOW_API_BASE: process.env.PLOW_API_BASE!, OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR!, ...(token ? { PLOW_AGENT_TOKEN: token } : {}),
   });
+  let running = false;
   const pass = async () => {
-    const root = `${state}/.openclaw/agents`;
+    if (running) return;
+    running = true;
     try {
-      exportLedger(root);
-    } catch (error) {
-      console.error(`agent-index: ${error instanceof Error ? error.message : String(error)}`);
+      const root = `${state}/.openclaw/agents`;
+      try {
+        exportLedger(root);
+      } catch (error) {
+        console.error(`agent-index: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      // usage daily stays at 0 sessions until this sync. A failed sync still reports.
+      if (await run("agentsview", ["sync"], { PATH: process.env.PATH!, HOME: "/var/lib/plow" })) console.error("agent-index: agentsview sync failed, reporting with what is already exported");
+      // 0 registered, 3 not registered, 2 state is there and unreadable. 2 is not
+      // 3: registering over state the client cannot read mints against a new
+      // install id and strands this install's published usage.
+      const registered = await python(["status"]);
+      if (registered !== 0 && registered !== 3) return console.error("agent-index: this install's state is unreadable (above), standing off rather than registering over it");
+      if (registered === 3) {
+        const register = ["--register", "--agent", agent];
+        // Sent only when set. The Index leaves a field it is not given alone, so
+        // an empty name would not clear the name, and one passed every pass would
+        // overwrite an edit the owner made on their page.
+        for (const [flag, value] of [["--name", process.env.AGENT_NAME], ["--blurb", process.env.AGENT_BLURB], ["--runtime", process.env.AGENT_RUNTIME]] as const) if (value) register.push(flag, value);
+        if (await python(register, process.env.PLOW_AGENT_TOKEN)) return console.error("agent-index: no index key this pass, not reporting");
+      }
+      if (await python(["--agent", agent])) console.error("agent-index: reporter exited non-zero, see the line above");
+    } finally {
+      running = false;
     }
-    // usage daily stays at 0 sessions until this sync. A failed sync still reports.
-    if (await run("agentsview", ["sync"], { PATH: process.env.PATH!, HOME: "/var/lib/plow" })) console.error("agent-index: agentsview sync failed, reporting with what is already exported");
-    // 0 registered, 3 not registered, 2 state is there and unreadable. 2 is not
-    // 3: registering over state the client cannot read mints against a new
-    // install id and strands this install's published usage.
-    const registered = await python(["status"]);
-    if (registered !== 0 && registered !== 3) return console.error("agent-index: this install's state is unreadable (above), standing off rather than registering over it");
-    if (registered === 3) {
-      const register = ["--register", "--agent", agent];
-      // Sent only when set. The Index leaves a field it is not given alone, so
-      // an empty name would not clear the name, and one passed every pass would
-      // overwrite an edit the owner made on their page.
-      for (const [flag, value] of [["--name", process.env.AGENT_NAME], ["--blurb", process.env.AGENT_BLURB], ["--runtime", process.env.AGENT_RUNTIME]] as const) if (value) register.push(flag, value);
-      if (await python(register, process.env.PLOW_AGENT_TOKEN)) return console.error("agent-index: no index key this pass, not reporting");
-    }
-    if (await python(["--agent", agent])) console.error("agent-index: reporter exited non-zero, see the line above");
   };
   void pass();
   // Never fatal, and never a reason to hold the process open: the gateway is

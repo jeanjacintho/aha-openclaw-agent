@@ -80,6 +80,35 @@ test("a registered install only reports", async t => {
   assert.deepEqual(argv(calls), [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
 });
 
+test("a pass is skipped while the previous Agent Index cycle is still running", async t => {
+  env(t, { AGENT_ID: "my-agent", PLOW_API_BASE: "https://api.example" });
+  const calls: string[][] = [];
+  let firstChild: EventEmitter | undefined;
+  let first = true;
+  t.mock.method(childProcess, "spawn", (command: string, args: string[]) => {
+    calls.push(command === "python3" ? args.slice(1) : [command, ...args]);
+    const child = Object.assign(new EventEmitter(), { kill() {} });
+    if (first) {
+      first = false;
+      firstChild = child;
+    } else {
+      queueMicrotask(() => child.emit("close", 0, null));
+    }
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  const handle = startAgentIndex(5, await stateDir(t));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  handle?.close?.();
+  assert.deepEqual(calls, [["agentsview", "sync"]], "interval ticks do not spawn duplicate passes while sync is pending");
+
+  firstChild!.emit("close", 0, null);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(calls, [["agentsview", "sync"], ["status"], ["--agent", "my-agent"]]);
+});
+
 test("unreadable state stands off rather than registering over it", async t => {
   env(t, { AGENT_ID: "my-agent", PLOW_API_BASE: "https://api.example" });
   t.mock.method(console, "error", () => {});
