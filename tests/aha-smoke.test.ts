@@ -3,7 +3,7 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { logDigestDelivery, startAha } from "../aha/worker.ts";
+import { logDigestDelivery, runWorkerStages, startAha } from "../aha/worker.ts";
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -44,4 +44,19 @@ test("digest delivery failures are logged", t => {
   t.mock.method(console, "error", (line: string) => { errors.push(String(line)); });
   logDigestDelivery("uncertain", new Date("2026-09-23T12:00:00.000Z"));
   assert.deepEqual(errors, ["aha: digest 2026-09-23 was not delivered (uncertain)"]);
+});
+
+test("a failed worker stage is logged and later stages still run", async t => {
+  const errors: string[] = [];
+  const completed: string[] = [];
+  t.mock.method(console, "error", (line: string) => { errors.push(line); });
+  await runWorkerStages([
+    { name: "ingest", run: () => { completed.push("ingest"); } },
+    { name: "retention", run: () => { throw new Error("database is locked"); } },
+    { name: "classification", run: () => { completed.push("classification"); } },
+    { name: "drafts", run: () => { completed.push("drafts"); } },
+    { name: "promises", run: () => { completed.push("promises"); } },
+  ]);
+  assert.deepEqual(completed, ["ingest", "classification", "drafts", "promises"]);
+  assert.deepEqual(errors, ["aha: worker stage retention failed: database is locked"]);
 });
