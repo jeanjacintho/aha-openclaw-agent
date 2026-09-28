@@ -1,5 +1,5 @@
 import { getConfig } from "../config.ts";
-import { classifyBatch, MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, type ClassifyDeps, type ItemRow } from "../pipeline/classify.ts";
+import { classifyBatch, CLASSIFY_TRANSPORT_MAX_AGE_MS, MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, type ClassifyDeps, type ItemRow } from "../pipeline/classify.ts";
 import { ROLES, type Role } from "../pipeline/route.ts";
 import { sendToChat, type SendDeps, type SendResult } from "../notify/plow.ts";
 import { type Store } from "../store/db.ts";
@@ -11,9 +11,11 @@ export async function classifyNewItems(store: Store, deps?: ClassifyDeps & SendD
   const now = deps?.now?.() ?? new Date();
   await warnBudgetIfNeeded(store, deps);
   if (!classifyAllowed(store, now)) return;
+  const transportAgeLimit = new Date(now.getTime() - CLASSIFY_TRANSPORT_MAX_AGE_MS).toISOString();
   const items = store.db.prepare(`SELECT * FROM items
-    WHERE state = 'new' OR (state = 'needs_review' AND classify_attempts < ? AND classify_transport_attempts < ?) ORDER BY id`)
-    .all(MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS) as ItemRow[];
+    WHERE state = 'new' OR (state = 'needs_review' AND classify_attempts < ?
+      AND (classify_transport_attempts < ? OR fetched_at IS NULL OR fetched_at > ?)) ORDER BY id`)
+    .all(MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, transportAgeLimit) as ItemRow[];
   for (let i = 0; i < items.length; i += 20) {
     if (!classifyAllowed(store, now)) return;
     await classifyBatch(store, items.slice(i, i + 20), deps);

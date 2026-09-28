@@ -11,6 +11,7 @@ export const CLASSIFY_BATCH_SIZE = 20;
 export const MAX_CLASSIFY_ATTEMPTS = 3;
 // Persistent provider/network failures also need a finite path out of the queue.
 export const MAX_CLASSIFY_TRANSPORT_ATTEMPTS = 10;
+export const CLASSIFY_TRANSPORT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type ItemRow = {
   id: number;
@@ -35,6 +36,7 @@ export type ClassifyReport = {
 
 export type ClassifyDeps = CompleteDeps & {
   complete?: typeof complete;
+  now?: () => Date;
 };
 
 function feedbackExamples(store: Store) {
@@ -61,14 +63,16 @@ function review(store: Store, id: number) {
   store.db.prepare("UPDATE items SET state = 'needs_review', classify_attempts = classify_attempts + 1 WHERE id = ?").run(id);
 }
 
-function recordTransportFailure(store: Store, id: number) {
+function recordTransportFailure(store: Store, id: number, now: Date) {
+  const staleBefore = new Date(now.getTime() - CLASSIFY_TRANSPORT_MAX_AGE_MS).toISOString();
   const row = store.db.prepare(`UPDATE items SET
-      classify_transport_attempts = classify_transport_attempts + 1,
-      state = CASE WHEN classify_transport_attempts + 1 >= ? THEN 'needs_review' ELSE state END
-    WHERE id = ? RETURNING classify_transport_attempts`).get(
-    MAX_CLASSIFY_TRANSPORT_ATTEMPTS, id,
-  ) as { classify_transport_attempts: number } | undefined;
-  return (row?.classify_transport_attempts ?? 0) >= MAX_CLASSIFY_TRANSPORT_ATTEMPTS;
+      classify_transport_attempts = MIN(classify_transport_attempts + 1, ?),
+      state = CASE WHEN classify_transport_attempts + 1 >= ? AND fetched_at <= ? THEN 'needs_review' ELSE state END
+    WHERE id = ? RETURNING classify_transport_attempts, fetched_at`).get(
+    MAX_CLASSIFY_TRANSPORT_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, staleBefore, id,
+  ) as { classify_transport_attempts: number; fetched_at: string | null } | undefined;
+  return (row?.classify_transport_attempts ?? 0) >= MAX_CLASSIFY_TRANSPORT_ATTEMPTS
+    && row?.fetched_at !== null && row?.fetched_at !== undefined && row.fetched_at <= staleBefore;
 }
 
 function save(store: Store, id: number, c: Classification) {
@@ -110,13 +114,17 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
   }, deps);
   if (!result.ok && result.kind === "transport") {
     let exhausted = 0;
+    const attemptedAt = (deps.now ?? (() => new Date()))();
     for (const item of batch) {
-      if (recordTransportFailure(s, item.id)) {
+      if (recordTransportFailure(s, item.id, attemptedAt)) {
         exhausted += 1;
         report.needsReview += 1;
       }
     }
-    console.error(`aha: classify transport failure for ${batch.length} items; ${exhausted} reached the ${MAX_CLASSIFY_TRANSPORT_ATTEMPTS}-attempt limit and moved to needs_review, remaining items will retry next cycle: ${result.reason}`);
+    const outcome = exhausted > 0
+      ? `${exhausted} item(s) exceeded ${MAX_CLASSIFY_TRANSPORT_ATTEMPTS} attempts and 24h age and moved to needs_review`
+      : `no items reached both ${MAX_CLASSIFY_TRANSPORT_ATTEMPTS} attempts and 24h age`;
+    console.error(`aha: classify transport failure for ${batch.length} items; ${outcome}; remaining items will retry next cycle: ${result.reason}`);
     return report;
   }
   for (const item of batch) {

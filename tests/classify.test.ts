@@ -231,11 +231,14 @@ test("transport failures do not consume attempts and the item recovers on the ne
   assert.equal((store.db.prepare("SELECT classify_transport_attempts AS n FROM items WHERE id = ?").get(item.id) as { n: number }).n, 0);
 });
 
-test("persistent transport failures eventually move the item to needs_review", async t => {
+test("transport failures only exhaust after the attempt limit and 24h item age", async t => {
   const store = await home(t);
   const item = insert(store);
+  const now = new Date("2026-09-23T12:00:00.000Z");
+  store.db.prepare("UPDATE items SET fetched_at = ? WHERE id = ?").run(new Date(now.getTime() - 60 * 60 * 1000).toISOString(), item.id);
   let calls = 0;
   const deps = {
+    now: () => now,
     complete: async () => {
       calls += 1;
       return { ok: false as const, kind: "transport" as const, reason: "timeout" };
@@ -244,8 +247,16 @@ test("persistent transport failures eventually move the item to needs_review", a
 
   for (let i = 0; i < MAX_CLASSIFY_TRANSPORT_ATTEMPTS + 2; i += 1) await classifyNewItems(store, deps);
 
-  assert.equal(calls, MAX_CLASSIFY_TRANSPORT_ATTEMPTS);
+  assert.equal(calls, MAX_CLASSIFY_TRANSPORT_ATTEMPTS + 2);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "new", classify_attempts: 0 });
+  assert.equal((store.db.prepare("SELECT classify_transport_attempts AS n FROM items WHERE id = ?").get(item.id) as { n: number }).n, MAX_CLASSIFY_TRANSPORT_ATTEMPTS);
+
+  store.db.prepare("UPDATE items SET fetched_at = ? WHERE id = ?").run(new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString(), item.id);
+  await classifyNewItems(store, deps);
+  await classifyNewItems(store, deps);
+
   assert.deepEqual({ ...itemRow(store, item.id) }, { state: "needs_review", classify_attempts: 0 });
+  assert.equal(calls, MAX_CLASSIFY_TRANSPORT_ATTEMPTS + 3);
   assert.equal((store.db.prepare("SELECT classify_transport_attempts AS n FROM items WHERE id = ?").get(item.id) as { n: number }).n, MAX_CLASSIFY_TRANSPORT_ATTEMPTS);
 });
 
