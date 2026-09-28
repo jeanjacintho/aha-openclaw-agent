@@ -26,18 +26,27 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function home(t: import("node:test").TestContext, posts: { url: string; body: string }[] = [], redditOutcome?: "posted" | "uncertain") {
+async function home(
+  t: import("node:test").TestContext,
+  posts: { url: string; body: string }[] = [],
+  redditOutcome?: "posted" | "uncertain",
+  onMessage?: (url: string, body: string) => Promise<void>,
+  redditPosts: string[] = [],
+) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-approve-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("oauth.reddit.com/api/comment")) {
+      redditPosts.push(new URLSearchParams(String(init?.body ?? "")).get("text") ?? "");
       if (redditOutcome === "posted") return Response.json({ json: { data: { things: [{ data: { name: "t1_reply", permalink: "/r/test/comments/thread/reply" } }] } } });
       if (redditOutcome === "uncertain") return new Response("gateway error", { status: 500 });
     }
     if ((init?.method ?? "GET") === "POST" && url.includes("/messages")) {
-      posts.push({ url, body: String(init?.body ?? "") });
+      const body = String(init?.body ?? "");
+      posts.push({ url, body });
+      await onMessage?.(url, body);
       return Response.json({ uid: "msg_ok" });
     }
     return new Response("", { status: 404 });
@@ -165,6 +174,50 @@ test("approving sends the reply to the chat and returns only sent:true", async t
   const store = openStore(dir);
   t.after(() => store.close());
   assert.equal((store.db.prepare("SELECT state FROM drafts WHERE id = ?").get(draftId) as { state: string }).state, "approved");
+});
+
+test("an edit during the approval wait cannot change the body published to Reddit", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const redditPosts: string[] = [];
+  let owner: ReturnType<typeof tools>;
+  let publicId = "";
+  let editResult: ToolResult | undefined;
+  const dir = await home(t, posts, "posted", async (_url, body) => {
+    if (body.includes("Promover question")) {
+      editResult = await owner.get("aha_edit")!.execute("edit", {
+        draftId: publicId, text: "Thanks for asking about Plow queues with a changed reply. — AHA, AI assistant of Plow",
+      });
+    }
+  }, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const { itemId } = seedReddit(dir);
+  publicId = `AHA-${itemId}`;
+  const store = openStore(dir);
+  store.db.prepare("INSERT INTO autonomy (source, category, level, streak, suggested) VALUES ('reddit', 'question', 'L1', 4, 0)").run();
+  store.close();
+  owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+
+  const result = await owner.get("aha_approve")!.execute("approve", { draftId: `AHA-${itemId}` });
+  assert.equal(result.isError ?? false, false);
+  assert.equal(editResult?.isError, true);
+  assert.match(editResult?.content[0].text ?? "", /no longer pending/);
+  assert.equal(redditPosts.length, 1);
+  assert.equal(redditPosts[0], "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+});
+
+test("aha_edit refuses an already approved draft", async t => {
+  const dir = await home(t);
+  const { itemId, draftId } = seed(dir);
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  assert.equal((await owner.get("aha_approve")!.execute("approve", { draftId: `AHA-${itemId}` })).isError ?? false, false);
+  const edited = await owner.get("aha_edit")!.execute("edit", {
+    draftId: `AHA-${itemId}`, text: "Thanks for asking about Plow queues with a new approved response. — AHA, AI assistant of Plow",
+  });
+  assert.equal(edited.isError, true);
+  assert.match(edited.content[0].text, /no longer pending/);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal((store.db.prepare("SELECT body FROM drafts WHERE id = ?").get(draftId) as { body: string }).body, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
 });
 
 test("Reddit approval reports a confirmed post as sent", async t => {

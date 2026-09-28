@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getConfig } from "../config.ts";
 import { sendToChat } from "../notify/plow.ts";
 import { readSecrets } from "../secrets.ts";
@@ -9,7 +10,7 @@ import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
 
 export { redditSubreddit, redditThreadId, threadLedgerKey, postLedgerKey } from "./reddit-url.ts";
 
-type Draft = { id: number; itemId: number; body: string; state: string };
+type Draft = { id: number; itemId: number; body: string; state: string; approvedSha256: string | null; approvedAt: string | null };
 
 export type PostResult = "posted" | "uncertain" | "failed";
 
@@ -121,19 +122,38 @@ function finish(store: Store, postKey: string, threadKey: string, state: string,
   setLedger(store, threadKey, state, url);
 }
 
+function releaseReadyReservation(store: Store, postKey: string, threadKey: string, url: string | null) {
+  store.tx(() => {
+    store.db.prepare(`DELETE FROM ledger WHERE state = 'ready' AND url IS ?
+      AND key IN (?, ?)`).run(url, postKey, threadKey);
+  });
+}
+
 export async function postReply(store: Store, draftId: number, deps: PostDeps = {}): Promise<PostResult> {
-  const draft = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE id = ?").get(draftId) as Draft | undefined;
+  const draft = store.db.prepare(`SELECT id, item_id AS itemId, body, state,
+      approved_sha256 AS approvedSha256, approved_at AS approvedAt FROM drafts WHERE id = ?`).get(draftId) as Draft | undefined;
   if (!draft) return "failed";
   const item = store.db.prepare("SELECT source, external_id AS externalId, url FROM items WHERE id = ?").get(draft.itemId) as {
     source: string; externalId: string; url: string | null;
   } | undefined;
   if (!item) return "failed";
   if (item.source !== "reddit") return "failed";
-  if (paused(store)) return "failed";
   const now = deps.now?.() ?? new Date();
-  const day = ymd(now);
+  const approvedAt = draft.approvedAt ? new Date(draft.approvedAt) : undefined;
+  const reservationDay = approvedAt && Number.isFinite(approvedAt.getTime()) ? approvedAt : now;
+  const day = ymd(reservationDay);
   const key = postLedgerKey(day, item.source, item.externalId, item.url);
   const thread = threadLedgerKey(item.source, item.externalId, item.url);
+  const approvedHashMatches = Boolean(draft.approvedSha256)
+    && createHash("sha256").update(draft.body).digest("hex") === draft.approvedSha256;
+  if (draft.state !== "approved" || !approvedHashMatches) {
+    releaseReadyReservation(store, key, thread, item.url);
+    return "failed";
+  }
+  if (paused(store)) {
+    releaseReadyReservation(store, key, thread, item.url);
+    return "failed";
+  }
   const claimed = claimKeys(store, key, thread, item.url);
   if (claimed !== "owned") {
     if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
