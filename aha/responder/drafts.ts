@@ -226,17 +226,20 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
           const approvedAt = now.toISOString();
           const approvedSha256 = createHash("sha256").update(draft.body).digest("hex");
           const approved = store.tx(() => {
+            if (!checkPolicy(store, draft, now).allow) return "blocked" as const;
             const result = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
               WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
-            if (result.changes !== 1) return false;
+            if (result.changes !== 1) return "changed" as const;
             recordDraftEvent(store, { draftId: draft.id, itemId: row.id, actor: "autonomy", action: "auto_approved", body: draft.body, at: now });
-            return true;
+            return "approved" as const;
           });
-          if (!approved) continue;
-          const posted = await postReply(store, draft.id, { fetch: deps.fetch, now: deps.now });
-          if (posted === "posted" || posted === "uncertain") continue;
-          store.db.prepare(`UPDATE drafts SET state = 'pending', approved_sha256 = NULL, approved_at = NULL
-            WHERE id = ? AND state = 'approved' AND approved_sha256 = ?`).run(draft.id, approvedSha256);
+          if (approved === "changed") continue;
+          if (approved === "approved") {
+            const posted = await postReply(store, draft.id, { fetch: deps.fetch, now: deps.now });
+            if (posted === "posted" || posted === "uncertain") continue;
+            store.db.prepare(`UPDATE drafts SET state = 'pending', approved_sha256 = NULL, approved_at = NULL
+              WHERE id = ? AND state = 'approved' AND approved_sha256 = ?`).run(draft.id, approvedSha256);
+          }
         }
       }
       const text = `Rascunho AHA-${row.id}\n${draft.body}${row.url ? `\n${row.url}` : ""}`;

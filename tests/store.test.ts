@@ -43,7 +43,7 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.deepEqual(tables(first), TABLES);
   assert.deepEqual(columns(first, "source_runs"), ["id", "source", "window_start", "window_end", "status", "detail"]);
   assert.deepEqual(columns(first, "deliveries"), ["key", "chat_uid", "status", "message_uid", "created_at", "updated_at", "body"]);
-  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
+  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 18);
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'forget_audit_target_hash_idx'").get() as { name: string }).name, "forget_audit_target_hash_idx");
   assert.equal(columns(first, "drafts").includes("edited"), true);
   assert.equal(columns(first, "items").includes("assignee"), true);
@@ -58,6 +58,8 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'drafts_one_active_per_item_idx'").get() as { name: string }).name, "drafts_one_active_per_item_idx");
   assert.deepEqual(columns(first, "draft_events"), ["id", "draft_id", "item_id", "at", "actor", "action", "body_sha256", "detail"]);
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'draft_events_item_id_idx'").get() as { name: string }).name, "draft_events_item_id_idx");
+  assert.equal(columns(first, "ledger").includes("claimed_at"), true);
+  assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ledger_claimed_at_idx'").get() as { name: string }).name, "ledger_claimed_at_idx");
   first.db.prepare("INSERT INTO items (source, external_id) VALUES (?, ?)").run("hn", "1");
   assert.equal((first.db.prepare("SELECT origin FROM items WHERE external_id = '1'").get() as { origin: string }).origin, "live");
   assert.equal((first.db.prepare("SELECT classify_transport_attempts FROM items WHERE external_id = '1'").get() as { classify_transport_attempts: number }).classify_transport_attempts, 0);
@@ -83,11 +85,27 @@ test("migration adds origin to an existing database and defaults old rows to liv
 
   const migrated = openStore(dir);
   t.after(() => migrated.close());
-  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
+  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 18);
   assert.equal((migrated.db.prepare("SELECT origin FROM items WHERE external_id = 'old-row'").get() as { origin: string }).origin, "live");
   assert.equal((migrated.db.prepare("SELECT body FROM deliveries WHERE key = 'old-delivery'").get() as { body: string | null }).body, null);
   assert.equal((migrated.db.prepare("SELECT body FROM drafts WHERE item_id = (SELECT id FROM items WHERE external_id = 'old-row') AND state = 'pending'").get() as { body: string }).body, "newer draft");
   assert.equal((migrated.db.prepare("SELECT approved_sha256 FROM drafts WHERE item_id = (SELECT id FROM items WHERE external_id = 'old-row') AND state = 'pending'").get() as { approved_sha256: string | null }).approved_sha256, null);
+});
+
+test("migration gives old counted post reservations a conservative claimed_at", async t => {
+  const dir = await home(t);
+  const migrationDir = new URL("../aha/store/migrations/", import.meta.url);
+  const before018 = (await fs.readdir(migrationDir))
+    .filter(name => /^\d+_.*\.sql$/.test(name) && name < "018_ledger_claimed_at.sql").sort();
+  const sql = await Promise.all(before018.map(name => fs.readFile(new URL(name, migrationDir), "utf8")));
+  const old = openStore(dir, sql);
+  old.db.prepare("INSERT INTO ledger (key, state, url) VALUES ('post:2026-09-22:reddit:testaha:t3_old', 'posted', NULL)").run();
+  old.close();
+  const migrated = openStore(dir);
+  t.after(() => migrated.close());
+  const row = migrated.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key LIKE 'post:%'").get() as { claimedAt: string | null };
+  assert.ok(row.claimedAt);
+  assert.ok(Math.abs(Date.now() - Date.parse(row.claimedAt!)) < 60_000);
 });
 
 test("a duplicate source and external id is rejected", async t => {
@@ -126,6 +144,20 @@ test("saveConfig rejects an invalid IANA timezone", async t => {
   assert.equal(getConfig(store)?.tz, "America/Sao_Paulo");
 });
 
+test("saveConfig rejects posting limits outside their supported ranges", async t => {
+  const store = openStore(await home(t));
+  t.after(() => store.close());
+  for (const postingLimits of [
+    { perDay: 0 }, { perDay: 51 }, { perDay: 2.5 },
+    { perCommunityPerDay: 11 }, { minIntervalMinutes: -1 }, { minIntervalMinutes: 721 },
+    { unknown: 1 },
+  ]) {
+    assert.throws(() => saveConfig(store, { company: { name: "Plow" }, postingLimits } as never), /postingLimits/);
+  }
+  saveConfig(store, { company: { name: "Plow" }, postingLimits: { perDay: 5, minIntervalMinutes: 0 } });
+  assert.deepEqual(getConfig(store)?.postingLimits, { perDay: 5, minIntervalMinutes: 0 });
+});
+
 test("secrets.json is created with mode 0600", async t => {
   const dir = await home(t);
   writeSecrets(dir, { github: "token" });
@@ -159,7 +191,7 @@ test("two processes can open a new database at the same time", async t => {
     for (const result of results) assert.equal(result.status, 0, result.stderr);
     const store = openStore(dir);
     t.after(() => store.close());
-    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 17);
+    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 18);
     assert.deepEqual(tables(store), TABLES);
   }
 });

@@ -3,7 +3,7 @@ import { type Store } from "../store/db.ts";
 import { validateReply } from "./validate.ts";
 import { postLedgerKey, redditSubreddit, threadLedgerKey } from "./reddit-url.ts";
 
-export type PolicyResult = { allow: true } | { allow: false; reasons: string[] };
+export type PolicyResult = { allow: true } | { allow: false; reasons: string[]; nextAllowedAt?: string; postingReasons?: string[] };
 
 export const POLICY = {
   mention: "company not mentioned and no ask for help",
@@ -17,8 +17,8 @@ export const POLICY = {
 
 const RED_LINE = new Set(["security", "legal", "pricing"]);
 const RED_TOPIC = /imprensa|press|ameaça|threat|saúde|health|política|politic|dado pessoal|pii/i;
-const TOTAL_DAY = 10;
-const COMMUNITY_DAY = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_POSTING_LIMITS = { perDay: 10, perCommunityPerDay: 3, minIntervalMinutes: 10 } as const;
 const COUNTED = ["posting", "posted", "ready", "verified", "uncertain"] as const;
 
 export function isRedLine(category: string | null | undefined, topic: string | null | undefined) {
@@ -41,17 +41,29 @@ type Row = {
   confidence: number | null;
 };
 
-function ymd(now: Date) {
-  return now.toISOString().slice(0, 10);
-}
-
 function mentioned(hay: string, names: string[]) {
   const text = hay.toLowerCase();
   return names.some(name => name && text.includes(name.toLowerCase()));
 }
 
-function countLedger(store: Store, like: string) {
-  return (store.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE key LIKE ? AND state IN ('posting', 'posted', 'ready', 'verified', 'uncertain')").get(like) as { n: number }).n;
+function postingLimits(store: Store) {
+  const configured = getConfig(store)?.postingLimits;
+  return {
+    perDay: configured?.perDay ?? DEFAULT_POSTING_LIMITS.perDay,
+    perCommunityPerDay: configured?.perCommunityPerDay ?? DEFAULT_POSTING_LIMITS.perCommunityPerDay,
+    minIntervalMinutes: configured?.minIntervalMinutes ?? DEFAULT_POSTING_LIMITS.minIntervalMinutes,
+  };
+}
+
+function recentPostClaims(store: Store, cutoff: string, now: Date) {
+  const rows = store.db.prepare(`SELECT key, claimed_at AS claimedAt FROM ledger
+    WHERE key LIKE 'post:%' AND state IN ('posting', 'posted', 'ready', 'verified', 'uncertain')
+      AND (claimed_at IS NULL OR claimed_at > ?)`)
+    .all(cutoff) as { key: string; claimedAt: string | null }[];
+  return rows.map(row => {
+    const timestamp = row.claimedAt ? Date.parse(row.claimedAt) : now.getTime();
+    return { key: row.key, at: Number.isFinite(timestamp) ? timestamp : now.getTime() };
+  });
 }
 
 function threadTaken(store: Store, source: string, externalId: string, url: string | null) {
@@ -59,19 +71,71 @@ function threadTaken(store: Store, source: string, externalId: string, url: stri
   return row != null && (COUNTED as readonly string[]).includes(row.state);
 }
 
-export function postingLimitReasons(store: Store, itemId: number, now: Date): string[] {
+export type PostingLimitResult = { reasons: string[]; nextAllowedAt: string | null };
+
+export function postingLimitReasons(store: Store, itemId: number, now: Date): PostingLimitResult {
   const row = store.db.prepare("SELECT source, external_id AS externalId, url FROM items WHERE id = ?")
     .get(itemId) as { source: string; externalId: string; url: string | null } | undefined;
-  if (!row) return ["item not found"];
-  const day = ymd(now);
-  const total = countLedger(store, `post:${day}:%`);
+  if (!row) return { reasons: ["item not found"], nextAllowedAt: null };
+  const cutoff = new Date(now.getTime() - DAY_MS).toISOString();
+  const claims = recentPostClaims(store, cutoff, now);
+  const totalTimes = claims.map(claim => claim.at).sort((a, b) => a - b);
   const sub = row.source === "reddit" ? redditSubreddit(row.url) : undefined;
-  const community = countLedger(store, sub ? `post:${day}:reddit:${sub}:%` : `post:${day}:${row.source}:%`);
+  const communityTimes = claims.filter(({ key }) => {
+    const parts = key.split(":");
+    if (row.source === "reddit") return parts[2] === "reddit" && (!sub || parts[3] === sub);
+    return parts[2] === row.source;
+  }).map(claim => claim.at).sort((a, b) => a - b);
+  const redditTimes = row.source === "reddit"
+    ? claims.filter(({ key }) => key.split(":")[2] === "reddit").map(claim => claim.at).sort((a, b) => a - b)
+    : [];
+  const limits = postingLimits(store);
   const reasons: string[] = [];
-  if (total >= TOTAL_DAY) reasons.push("daily posting limit reached");
-  if (community >= COMMUNITY_DAY) reasons.push("community posting limit reached");
+  const releaseTimes: number[] = [];
+  if (totalTimes.length >= limits.perDay) {
+    reasons.push("rolling 24-hour posting limit reached");
+    releaseTimes.push(totalTimes[0] + DAY_MS);
+  }
+  if (communityTimes.length >= limits.perCommunityPerDay) {
+    reasons.push("rolling 24-hour community posting limit reached");
+    releaseTimes.push(communityTimes[0] + DAY_MS);
+  }
+  if (limits.minIntervalMinutes > 0 && redditTimes.length > 0) {
+    const releaseAt = redditTimes[redditTimes.length - 1] + limits.minIntervalMinutes * 60_000;
+    if (releaseAt > now.getTime()) {
+      reasons.push("minimum interval between Reddit posts has not elapsed");
+      releaseTimes.push(releaseAt);
+    }
+  }
   if (threadTaken(store, row.source, row.externalId, row.url)) reasons.push("thread already has a counted post");
-  return reasons;
+  const nextAllowedAt = releaseTimes.length > 0 ? new Date(Math.max(...releaseTimes)).toISOString() : null;
+  return { reasons, nextAllowedAt };
+}
+
+export function postingLimitMessage(store: Store, nextAllowedAt: string, reasons: string[] = []) {
+  const cfg = getConfig(store);
+  const timezone = cfg?.tz || "UTC";
+  const locale = cfg?.language?.toLowerCase().startsWith("pt") ? "pt-BR" : "en-US";
+  let time: string;
+  try {
+    time = new Intl.DateTimeFormat(locale, { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(nextAllowedAt));
+  } catch {
+    time = new Intl.DateTimeFormat(locale, { timeZone: "UTC", dateStyle: "medium", timeStyle: "short" }).format(new Date(nextAllowedAt));
+  }
+  const labels = locale === "pt-BR"
+    ? reasons.map(reason => ({
+      "rolling 24-hour posting limit reached": "o limite total móvel de 24 horas",
+      "rolling 24-hour community posting limit reached": "o limite móvel de 24 horas da comunidade",
+      "minimum interval between Reddit posts has not elapsed": "o intervalo mínimo entre posts no Reddit",
+    } as Record<string, string>)[reason] ?? reason)
+    : reasons.map(reason => ({
+      "rolling 24-hour posting limit reached": "daily posting limit reached",
+      "rolling 24-hour community posting limit reached": "community posting limit reached",
+    } as Record<string, string>)[reason] ?? reason);
+  const rules = labels.length ? ` (${labels.join("; ")})` : "";
+  return locale === "pt-BR"
+    ? `O limite de ritmo de publicação${rules} foi atingido. Você poderá tentar novamente após ${time} (${timezone}).`
+    : `The posting pace limit${rules} was reached. You can try again after ${time} (${timezone}).`;
 }
 
 export function postingPaused(store: Store) {
@@ -98,7 +162,8 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
     store.db.prepare("UPDATE items SET state = 'escalated' WHERE id = ?").run(draft.itemId);
   }
   if ((row.confidence ?? 0) < 0.8) reasons.push(POLICY.confidence);
-  if (postingLimitReasons(store, draft.itemId, now).length > 0) {
+  const limit = postingLimitReasons(store, draft.itemId, now);
+  if (limit.reasons.length > 0) {
     reasons.push(POLICY.rateLimit);
   }
   const valid = validateReply(draft.body, {
@@ -109,7 +174,12 @@ export function checkPolicy(store: Store, draft: Draft, now: Date): PolicyResult
   }, "strict");
   if (!valid.ok) reasons.push(POLICY.validator);
   if (postingPaused(store)) reasons.push(POLICY.paused);
-  return reasons.length === 0 ? { allow: true } : { allow: false, reasons };
+  return reasons.length === 0 ? { allow: true } : {
+    allow: false,
+    reasons,
+    ...(limit.nextAllowedAt ? { nextAllowedAt: limit.nextAllowedAt } : {}),
+    ...(limit.reasons.length ? { postingReasons: limit.reasons } : {}),
+  };
 }
 
 export function recordReady(store: Store, draft: Draft, now: Date) {
@@ -117,11 +187,11 @@ export function recordReady(store: Store, draft: Draft, now: Date) {
     source: string; external_id: string; url: string | null;
   } | undefined;
   if (!row) return;
-  const day = ymd(now);
+  const day = now.toISOString().slice(0, 10);
   const postKey = postLedgerKey(day, row.source, row.external_id, row.url);
   const threadKey = threadLedgerKey(row.source, row.external_id, row.url);
-  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO NOTHING")
-    .run(postKey, row.url);
-  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?) ON CONFLICT (key) DO NOTHING")
-    .run(threadKey, row.url);
+  store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'ready', ?, ?) ON CONFLICT (key) DO NOTHING")
+    .run(postKey, row.url, now.toISOString());
+  store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'ready', ?, ?) ON CONFLICT (key) DO NOTHING")
+    .run(threadKey, row.url, now.toISOString());
 }

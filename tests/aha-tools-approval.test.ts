@@ -307,6 +307,8 @@ test("aha_retry posts an absent Reddit approval once and atomically refreshes ap
   assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.threadKey) as { state: string }).state, "verified");
   const retryPostKey = postLedgerKey(new Date(retryAt).toISOString().slice(0, 10), "reddit", "t3_thread", seeded.url);
   assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(retryPostKey) as { state: string }).state, "verified");
+  assert.equal((store.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key = ?").get(retryPostKey) as { claimedAt: string }).claimedAt, new Date(retryAt).toISOString());
+  assert.equal((store.db.prepare("SELECT claimed_at AS claimedAt FROM ledger WHERE key = ?").get(seeded.threadKey) as { claimedAt: string }).claimedAt, new Date(retryAt).toISOString());
   assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.postKey) as { state: string }).state, "absent");
   const retryEvent = store.db.prepare(`SELECT actor, action, body_sha256 FROM draft_events
     WHERE draft_id = ? AND action = 'retried'`).get(seeded.draftId) as { actor: string; action: string; body_sha256: string };
@@ -412,6 +414,44 @@ test("aha_retry refuses when daily or community limits are reached", async t => 
   assert.match(result.content[0].text, /community posting limit reached/);
 });
 
+test("aha_retry returns the next allowed time when the Reddit interval blocks it", async t => {
+  const dir = await home(t);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const claimedAt = new Date(Date.now() - 5 * 60_000);
+  const key = postLedgerKey(claimedAt.toISOString().slice(0, 10), "reddit", "t3_recent", "https://www.reddit.com/r/elsewhere/comments/recent/title/");
+  store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'posted', NULL, ?)").run(key, claimedAt.toISOString());
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.deepEqual((result.details as { reasons: string[] }).reasons, ["minimum interval between Reddit posts has not elapsed"]);
+  const expectedAt = new Date(claimedAt.getTime() + 10 * 60_000).toISOString();
+  assert.equal((result.details as { nextAllowedAt: string }).nextAllowedAt, expectedAt);
+  assert.match(result.content[0].text, /try again after/i);
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.threadKey) as { state: string }).state, "absent");
+});
+
+test("aha_retry respects the rolling 24-hour total cap", async t => {
+  const dir = await home(t);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const now = new Date();
+  for (let i = 0; i < 10; i++) {
+    const at = new Date(now.getTime() - 20 * 60_000);
+    const key = postLedgerKey(at.toISOString().slice(0, 10), "reddit", `t3_recent${i}`, `https://www.reddit.com/r/other${i}/comments/recent/title/`);
+    store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'posted', NULL, ?)").run(key, at.toISOString());
+  }
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.deepEqual((result.details as { reasons: string[] }).reasons, ["rolling 24-hour posting limit reached"]);
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.threadKey) as { state: string }).state, "absent");
+});
+
 test("aha_retry refuses when the approved body hash no longer matches", async t => {
   const dir = await home(t);
   const seeded = seedAbsentRetry(dir);
@@ -506,6 +546,31 @@ test("Reddit approval reports an uncertain post without claiming success", async
   const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
   assert.deepEqual(result.details, { sent: false, reason: "reddit post uncertain", confirmationSent: true });
   assert.match(posts.find(post => post.url.includes("/chats/cht_dm/messages") && post.body.includes("Publicação no Reddit"))!.body, /Publicação no Reddit não confirmada/);
+});
+
+test("aha_approve returns localized nextAllowedAt and leaves a rate-limited draft pending", async t => {
+  const posts: { url: string; body: string }[] = [];
+  const dir = await home(t, posts);
+  const { itemId, draftId } = seedReddit(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  saveConfig(store, {
+    company: { name: "Plow", aliases: ["plow"] },
+    ownerChatUid: "cht_dm", language: "pt-BR", tz: "America/Sao_Paulo",
+  });
+  const claimedAt = new Date(Date.now() - 5 * 60_000);
+  const recentKey = postLedgerKey(claimedAt.toISOString().slice(0, 10), "reddit", "t3_other", "https://www.reddit.com/r/elsewhere/comments/recent/title/");
+  store.db.prepare("INSERT INTO ledger (key, state, url, claimed_at) VALUES (?, 'posted', NULL, ?)").run(recentKey, claimedAt.toISOString());
+  const owner = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  const result = await owner.get("aha_approve")!.execute("call", { draftId: `AHA-${itemId}` });
+  const details = result.details as { sent: boolean; nextAllowedAt: string; message: string };
+  assert.equal(details.sent, false);
+  assert.equal(details.nextAllowedAt, new Date(claimedAt.getTime() + 10 * 60_000).toISOString());
+  assert.match(details.message, /Você poderá tentar novamente após/);
+  assert.match(details.message, /America\/Sao_Paulo/);
+  const draft = store.db.prepare("SELECT state, approved_at AS approvedAt FROM drafts WHERE id = ?").get(draftId) as { state: string; approvedAt: string | null };
+  assert.deepEqual({ ...draft }, { state: "pending", approvedAt: null });
+  assert.equal(posts.length, 0);
 });
 
 test("Reddit approval reports a failed post without claiming success", async t => {

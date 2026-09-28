@@ -103,6 +103,11 @@ existing items are deduplicated. If the source is not selected, explain that
 it must first be added with `aha_setup_save` before it can be watched or
 backfilled.
 
+Owner-only `aha_setup_save({postingLimits})` sets rolling 24h pace:
+`perDay` 10 (range 1–50), `perCommunityPerDay` 3 (1–10),
+`minIntervalMinutes` 10 (0–720). Report `nextAllowedAt` in the configured
+time zone; blocked drafts stay pending.
+
 Without a gate block (it could not run), call `aha_status` before deciding
 whether setup is needed. If the owner asks for Launch watch directly, run the
 same interview with sources Hacker News and Agent Index comments. Do not ask for an Agent Index slug:

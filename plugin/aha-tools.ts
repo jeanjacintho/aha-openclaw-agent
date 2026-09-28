@@ -9,7 +9,7 @@ import { ahaHome } from "../aha/home.ts";
 import { normalizeSourceId, watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { ForgetError, forgetByUrlOrAuthor } from "../aha/store/retention.ts";
-import { checkPolicy, postingLimitReasons, postingPaused, recordReady } from "../aha/responder/policy.ts";
+import { checkPolicy, postingLimitMessage, postingLimitReasons, postingPaused, recordReady } from "../aha/responder/policy.ts";
 import { confirmAutonomy, recordDecision, suggestText } from "../aha/responder/autonomy.ts";
 import { postReply, retryAbsentPost, threadLedgerKey, postLedgerKey, type PostResult } from "../aha/responder/post.ts";
 import { validateReply, type Draft } from "../aha/responder/drafts.ts";
@@ -184,6 +184,9 @@ function setupAnswers(args: Record<string, unknown>): SetupAnswers | string {
 
 function mergeSetup(previous: AhaConfig | null, args: Record<string, unknown>, ownerChatUid: string): AhaConfig {
   const company = typeof args.company === "string" ? args.company.trim() : previous?.company.name ?? "";
+  const requestedPostingLimits = args.postingLimits && typeof args.postingLimits === "object" && !Array.isArray(args.postingLimits)
+    ? args.postingLimits as NonNullable<AhaConfig["postingLimits"]>
+    : undefined;
   return {
     ...previous,
     company: {
@@ -201,6 +204,9 @@ function mergeSetup(previous: AhaConfig | null, args: Record<string, unknown>, o
     language: typeof args.lang === "string" ? args.lang : previous?.language,
     digestHour: typeof args.digestHour === "number" ? args.digestHour : previous?.digestHour,
     tz: typeof args.tz === "string" ? args.tz : previous?.tz,
+    postingLimits: requestedPostingLimits
+      ? { ...previous?.postingLimits, ...requestedPostingLimits }
+      : previous?.postingLimits,
     agentIndexSlug: previous?.agentIndexSlug || process.env.AGENT_ID,
     ownerChatUid,
   };
@@ -357,6 +363,15 @@ export function registerAhaTools(api: {
         lang: { type: "string" },
         digestHour: { type: "integer", minimum: 0, maximum: 23 },
         tz: { type: "string" },
+        postingLimits: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            perDay: { type: "integer", minimum: 1, maximum: 50 },
+            perCommunityPerDay: { type: "integer", minimum: 1, maximum: 10 },
+            minIntervalMinutes: { type: "integer", minimum: 0, maximum: 720 },
+          },
+        },
       },
     },
     async execute(_id, args) {
@@ -381,7 +396,11 @@ export function registerAhaTools(api: {
         // After setup, a change passes only its own field; the name stays.
         company = typeof merged.company === "string" ? merged.company.trim() : getConfig(store)?.company.name ?? "";
         if (!company) return fail("company is required");
-        saveConfig(store, mergeSetup(getConfig(store), merged, ownerChatUid));
+        try {
+          saveConfig(store, mergeSetup(getConfig(store), merged, ownerChatUid));
+        } catch (error) {
+          return fail(error instanceof Error ? error.message : "invalid setup configuration");
+        }
         clearDraft(store);
         needsCredentials = missingCredentials(getConfig(store), readSecrets());
       } finally {
@@ -895,8 +914,15 @@ export function registerAhaTools(api: {
         const threadState = (store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(threadKey) as { state: string } | undefined)?.state;
         if (threadState !== "absent") return fail(`thread status is ${threadState ?? "missing"}; retry requires absent`);
         if (postingPaused(store)) return fail("PAUSE is active; retry refused");
-        const limitReasons = postingLimitReasons(store, draft.itemId, new Date());
-        if (limitReasons.length > 0) return fail(limitReasons.join("; "));
+        const limit = postingLimitReasons(store, draft.itemId, new Date());
+        if (limit.reasons.length > 0) {
+          const message = limit.nextAllowedAt ? postingLimitMessage(store, limit.nextAllowedAt, limit.reasons) : limit.reasons.join("; ");
+          return {
+            isError: true,
+            content: [{ type: "text", text: message }],
+            details: { error: message, reasons: limit.reasons, nextAllowedAt: limit.nextAllowedAt },
+          };
+        }
         const auth = redditAuth(readSecrets().reddit);
         if (!auth?.canPost) return fail("Reddit posting credentials are unavailable; retry was not used");
         const result = await retryAbsentPost(store, draft.id, ctx.requesterSenderId!);
@@ -931,24 +957,34 @@ export function registerAhaTools(api: {
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
         const now = new Date();
-        const policy = checkPolicy(store, draft, now);
-        if (!policy.allow) return ok({ sent: false, reason: policy.reasons.join("; ") });
         const approvedAt = now.toISOString();
         const approvedSha256 = createHash("sha256").update(draft.body).digest("hex");
         const decision = store.tx(() => {
+          const policy = checkPolicy(store, draft, now);
+          if (!policy.allow) return { kind: "policy" as const, policy };
           const claimed = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
             WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
-          if (claimed.changes !== 1) return undefined;
+          if (claimed.changes !== 1) return { kind: "changed" as const };
           recordDraftEvent(store, { draftId: draft.id, itemId: draft.itemId, actor: ctx.requesterSenderId!, action: "approved", body: draft.body, at: now });
           recordReady(store, draft, now);
-          return recordDecision(store, draft, "approved");
+          return { kind: "approved" as const, decision: recordDecision(store, draft, "approved") };
         });
-        if (!decision) return fail("draft changed before approval; review it again");
-        if (decision.suggest) {
+        if (decision.kind === "policy") {
+          const { policy } = decision;
+          const message = policy.nextAllowedAt ? postingLimitMessage(store, policy.nextAllowedAt, policy.postingReasons) : undefined;
+          return ok({
+            sent: false,
+            reason: policy.reasons.join("; "),
+            ...(policy.nextAllowedAt ? { nextAllowedAt: policy.nextAllowedAt } : {}),
+            ...(message ? { message } : {}),
+          });
+        }
+        if (decision.kind === "changed") return fail("draft changed before approval; review it again");
+        if (decision.decision.suggest) {
           const cfg = getConfig(store);
           const owner = cfg?.ownerChatUid;
           if (owner) {
-            await sendToChat(owner, suggestText(decision.suggest.source, decision.suggest.category, cfg?.language || "pt"), `autonomy:${decision.suggest.source}:${decision.suggest.category}`, { store });
+            await sendToChat(owner, suggestText(decision.decision.suggest.source, decision.decision.suggest.category, cfg?.language || "pt"), `autonomy:${decision.decision.suggest.source}:${decision.decision.suggest.category}`, { store });
           }
         }
         const item = store.db.prepare("SELECT url, source FROM items WHERE id = ?").get(draft.itemId) as { url: string | null; source: string };
