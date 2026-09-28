@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -38,8 +39,11 @@ function seedReddit(store: ReturnType<typeof openStore>, over: { externalId?: st
   const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
   store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
     VALUES (?, 0, ?, 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId, over.category ?? "question");
-  store.db.prepare("INSERT INTO drafts (item_id, body, state) VALUES (?, ?, 'pending')")
-    .run(itemId, "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow");
+  const body = "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow";
+  const approvedAt = "2026-09-23T12:00:00.000Z";
+  const approvedSha256 = createHash("sha256").update(body).digest("hex");
+  store.db.prepare("INSERT INTO drafts (item_id, body, state, approved_sha256, approved_at) VALUES (?, ?, 'approved', ?, ?)")
+    .run(itemId, body, approvedSha256, approvedAt);
   const draft = store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ?").get(itemId) as Draft;
   return { itemId, draft };
 }
@@ -105,6 +109,27 @@ test("postReply writes posting then posted and verifies", async t => {
   assert.match(urls[0], /POST https:\/\/oauth.reddit.com\/api\/comment/);
   const row = store.db.prepare("SELECT state FROM ledger WHERE key = ?").get("post:2026-09-23:reddit:testaha:t1_abc") as { state: string };
   assert.equal(row.state, "verified");
+});
+
+test("postReply rejects a body that no longer matches its approval and releases ready reservations", async t => {
+  const { store } = await home(t);
+  const { draft } = seedReddit(store);
+  const postKey = "post:2026-09-23:reddit:testaha:t1_abc";
+  const threadKey = "thread:reddit:t3_xyz";
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?)").run(postKey, "https://www.reddit.com/r/testaha/comments/xyz/title/abc/");
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'ready', ?)").run(threadKey, "https://www.reddit.com/r/testaha/comments/xyz/title/abc/");
+  store.db.prepare("UPDATE drafts SET body = 'a different, unapproved body' WHERE id = ?").run(draft.id);
+  let comments = 0;
+  const result = await postReply(store, draft.id, {
+    now: () => new Date("2026-09-23T12:00:00.000Z"),
+    fetch: async input => {
+      if (String(input).includes("/api/comment")) comments += 1;
+      return Response.json(posted);
+    },
+  });
+  assert.equal(result, "failed");
+  assert.equal(comments, 0);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM ledger WHERE key IN (?, ?) AND state = 'ready'").get(postKey, threadKey) as { n: number }).n, 0);
 });
 
 test("uncertain ledger is never posted again", async t => {

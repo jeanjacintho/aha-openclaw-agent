@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getConfig } from "../config.ts";
 import { complete, type CompleteDeps } from "../llm/client.ts";
 import { draftSystemPrompt } from "../llm/prompts.ts";
@@ -216,8 +217,15 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
       if (itemAutonomy(store, row.about, row.source, row.category ?? "other") === "L2") {
         const policy = checkPolicy(store, draft, now);
         if (policy.allow) {
+          const approvedAt = now.toISOString();
+          const approvedSha256 = createHash("sha256").update(draft.body).digest("hex");
+          const approved = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
+            WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
+          if (approved.changes !== 1) continue;
           const posted = await postReply(store, draft.id, { fetch: deps.fetch, now: deps.now });
           if (posted === "posted" || posted === "uncertain") continue;
+          store.db.prepare(`UPDATE drafts SET state = 'pending', approved_sha256 = NULL, approved_at = NULL
+            WHERE id = ? AND state = 'approved' AND approved_sha256 = ?`).run(draft.id, approvedSha256);
         }
       }
       const text = `Rascunho AHA-${row.id}\n${draft.body}${row.url ? `\n${row.url}` : ""}`;

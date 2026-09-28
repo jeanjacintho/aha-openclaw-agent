@@ -322,6 +322,10 @@ function pendingDraftForItem(store: Store, itemId: number): Draft | undefined {
   return store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1").get(itemId) as Draft | undefined;
 }
 
+function latestDraftForItem(store: Store, itemId: number): Draft | undefined {
+  return store.db.prepare("SELECT id, item_id AS itemId, body, state FROM drafts WHERE item_id = ? ORDER BY id DESC LIMIT 1").get(itemId) as Draft | undefined;
+}
+
 export function registerAhaTools(api: {
   registerTool: (factory: (context: Requester) => {
     name: string;
@@ -871,8 +875,11 @@ export function registerAhaTools(api: {
         const now = new Date();
         const policy = checkPolicy(store, draft, now);
         if (!policy.allow) return ok({ sent: false, reason: policy.reasons.join("; ") });
-        const claimed = store.db.prepare("UPDATE drafts SET state = 'approved' WHERE id = ? AND state = 'pending'").run(draft.id);
-        if (claimed.changes !== 1) return fail("draft is not claimable");
+        const approvedAt = now.toISOString();
+        const approvedSha256 = createHash("sha256").update(draft.body).digest("hex");
+        const claimed = store.db.prepare(`UPDATE drafts SET state = 'approved', approved_sha256 = ?, approved_at = ?
+          WHERE id = ? AND state = 'pending' AND body = ?`).run(approvedSha256, approvedAt, draft.id, draft.body);
+        if (claimed.changes !== 1) return fail("draft changed before approval; review it again");
         recordReady(store, draft, now);
         const decision = recordDecision(store, draft, "approved");
         if (decision.suggest) {
@@ -929,8 +936,9 @@ export function registerAhaTools(api: {
       if (!text.trim()) return fail("text is required");
       const store = openStore();
       try {
-        const draft = pendingDraftForItem(store, id);
-        if (!draft || draft.state !== "pending") return fail("draft not found");
+        const draft = latestDraftForItem(store, id);
+        if (!draft) return fail("draft not found");
+        if (draft.state !== "pending") return fail("draft is no longer pending");
         const blocked = canActOnItem(store, ctx, draft.itemId);
         if (blocked) return blocked;
         const cfg = getConfig(store);
@@ -945,7 +953,8 @@ export function registerAhaTools(api: {
           links: cfg?.links,
         });
         if (!checked.ok) return fail(`draft failed validation: ${checked.reason}`);
-        store.db.prepare("UPDATE drafts SET body = ? WHERE id = ?").run(checked.body, draft.id);
+        const updated = store.db.prepare("UPDATE drafts SET body = ? WHERE id = ? AND state = 'pending'").run(checked.body, draft.id);
+        if (updated.changes !== 1) return fail("draft is no longer pending");
         recordDecision(store, { ...draft, body: checked.body }, "edited");
         return ok({ draftId: draft.id, publicId: `AHA-${draft.itemId}`, edited: true });
       } finally {
