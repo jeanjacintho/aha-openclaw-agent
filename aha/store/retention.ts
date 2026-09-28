@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { ahaHome } from "../home.ts";
+import { threadLedgerKey } from "../responder/reddit-url.ts";
 import { type Store } from "./db.ts";
 
 export const RETENTION_DAYS = 90;
@@ -70,9 +71,10 @@ function deleteItems(store: Store, ids: number[]) {
       source: string; external_id: string; url: string | null;
     } | undefined;
     if (ident) {
+      const threadKey = threadLedgerKey(ident.source, ident.external_id, ident.url);
       store.db.prepare("DELETE FROM ledger WHERE key LIKE ? OR key = ?").run(
         `post:%:${ident.source}:${ident.external_id}`,
-        `thread:${ident.source}:${ident.external_id}`,
+        threadKey,
       );
       if (ident.url) store.db.prepare("DELETE FROM ledger WHERE url = ?").run(ident.url);
     }
