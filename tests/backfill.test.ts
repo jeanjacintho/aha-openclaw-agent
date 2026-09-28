@@ -72,6 +72,10 @@ test("backfill follows source cursors and does not duplicate", async t => {
   assert.equal(second.sources[0].stored, 0);
   assert.deepEqual(cursors, [null, "p2", null, "p2"]);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n, 2);
+  assert.deepEqual(
+    (store.db.prepare("SELECT DISTINCT origin FROM items").all() as { origin: string }[]).map(row => row.origin),
+    ["backfill"],
+  );
   const since = queries[0].since.getTime();
   const until = queries[0].until.getTime();
   assert.equal(until, now.getTime());

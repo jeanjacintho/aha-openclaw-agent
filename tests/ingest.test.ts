@@ -107,6 +107,10 @@ test("running ingest twice does not duplicate items", async t => {
   assert.equal(first.sources[0].stored, 2);
   assert.equal(second.sources[0].stored, 0);
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n, 2);
+  assert.deepEqual(
+    (store.db.prepare("SELECT DISTINCT origin FROM items").all() as { origin: string }[]).map(row => row.origin),
+    ["live"],
+  );
   const ids = (store.db.prepare("SELECT external_id FROM items ORDER BY external_id").all() as { external_id: string }[]).map(row => row.external_id);
   assert.deepEqual(ids, ["111", "113"]);
   const detail = (store.db.prepare("SELECT detail FROM source_runs ORDER BY id LIMIT 1").get() as { detail: string | null }).detail;

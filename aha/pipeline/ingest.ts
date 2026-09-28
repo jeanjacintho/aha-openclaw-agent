@@ -65,11 +65,11 @@ function queryFor(cfg: AhaConfig, now: Date, window?: { since: Date; until: Date
   return { since: new Date(now.getTime() - DAY_MS), until: now, terms: termsFrom(cfg) };
 }
 
-export function insertItem(store: Store, item: RawItem, now: Date) {
-  return store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new')
+export function insertItem(store: Store, item: RawItem, now: Date, origin: "live" | "backfill" = "live") {
+  return store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state, origin)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
     ON CONFLICT (source, external_id) DO NOTHING`).run(
-    item.source, item.externalId, item.url, item.author, item.title ?? null, item.body, item.publishedAt, now.toISOString(),
+    item.source, item.externalId, item.url, item.author, item.title ?? null, item.body, item.publishedAt, now.toISOString(), origin,
   ).changes;
 }
 
@@ -89,6 +89,7 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
   const cfg = getConfig(store);
   if (!cfg) return { sources: [] };
   const query = queryFor(cfg, now, window);
+  const origin = window ? "backfill" : "live";
   const sources: IngestReport["sources"] = [];
   for (const adapter of adapters) {
     if (!adapter.enabled(cfg)) continue;
@@ -107,7 +108,7 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
         }
         for (const item of result.items) {
           if (!passesFilter1(item, cfg)) continue;
-          stored += Number(insertItem(store, item, now));
+          stored += Number(insertItem(store, item, now, origin));
         }
         cursor = result.nextCursor;
         pages += 1;
