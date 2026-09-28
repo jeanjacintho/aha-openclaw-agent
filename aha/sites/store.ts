@@ -95,8 +95,10 @@ export function removeSite(store: Store, ref: number | string): boolean {
   return true;
 }
 
-/** Block hashes already seen on a site, capped so the row cannot grow forever. */
-const MAX_CURSOR_ENTRIES = 500;
+/** Keep more history for large pages while bounding each site's cursor row. */
+// This limit is finite by design: raising it reduces repeats on large pages,
+// but does not solve cursor eviction for pages larger than the cap.
+const MAX_CURSOR_ENTRIES = 5_000;
 
 export function getCursor(store: Store, id: number): string[] {
   const row = store.db.prepare("SELECT cursor_json FROM sites WHERE id = ?").get(id) as { cursor_json: string } | undefined;

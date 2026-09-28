@@ -66,7 +66,7 @@ test("removeSite works by id or by URL, normalized or not", async t => {
   assert.equal(removeSite(store, "https://never-added.example.com/"), false);
 });
 
-test("the cursor tracks blocks already seen, capped, and survives a reopen", async t => {
+test("the cursor tracks blocks already seen, capped at 5000, and survives a reopen", async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-sites-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   let store = openStore(dir);
@@ -76,13 +76,14 @@ test("the cursor tracks blocks already seen, capped, and survives a reopen", asy
   assert.deepEqual(getCursor(store, added.site.id), []);
   saveCursor(store, added.site.id, ["h1", "h2"]);
   assert.deepEqual(getCursor(store, added.site.id), ["h1", "h2"]);
-  const many = Array.from({ length: 600 }, (_, i) => `h${i}`);
+  const many = Array.from({ length: 5_200 }, (_, i) => `h${i}`);
   saveCursor(store, added.site.id, many);
-  assert.equal(getCursor(store, added.site.id).length, 500);
-  assert.deepEqual(getCursor(store, added.site.id).slice(-2), ["h598", "h599"]);
+  assert.equal(getCursor(store, added.site.id).length, 5_000);
+  assert.deepEqual(getCursor(store, added.site.id).slice(0, 2), ["h200", "h201"]);
+  assert.deepEqual(getCursor(store, added.site.id).slice(-2), ["h5198", "h5199"]);
   store.close();
   store = openStore(dir);
-  assert.equal(getCursor(store, added.site.id).length, 500);
+  assert.equal(getCursor(store, added.site.id).length, 5_000);
   store.close();
 });
 
