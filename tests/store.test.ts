@@ -43,15 +43,17 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.deepEqual(tables(first), TABLES);
   assert.deepEqual(columns(first, "source_runs"), ["id", "source", "window_start", "window_end", "status", "detail"]);
   assert.deepEqual(columns(first, "deliveries"), ["key", "chat_uid", "status", "message_uid", "created_at", "updated_at", "body"]);
-  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 12);
+  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 13);
   assert.equal(columns(first, "drafts").includes("edited"), true);
   assert.equal(columns(first, "items").includes("assignee"), true);
   assert.equal(columns(first, "items").includes("draft_attempts"), true);
   assert.equal(columns(first, "items").includes("classify_attempts"), true);
+  assert.equal(columns(first, "items").includes("classify_transport_attempts"), true);
   assert.equal(columns(first, "items").includes("origin"), true);
   assert.equal(columns(first, "deliveries").includes("body"), true);
   first.db.prepare("INSERT INTO items (source, external_id) VALUES (?, ?)").run("hn", "1");
   assert.equal((first.db.prepare("SELECT origin FROM items WHERE external_id = '1'").get() as { origin: string }).origin, "live");
+  assert.equal((first.db.prepare("SELECT classify_transport_attempts FROM items WHERE external_id = '1'").get() as { classify_transport_attempts: number }).classify_transport_attempts, 0);
   first.close();
   const second = openStore(dir);
   t.after(() => second.close());
@@ -72,7 +74,7 @@ test("migration adds origin to an existing database and defaults old rows to liv
 
   const migrated = openStore(dir);
   t.after(() => migrated.close());
-  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 12);
+  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 13);
   assert.equal((migrated.db.prepare("SELECT origin FROM items WHERE external_id = 'old-row'").get() as { origin: string }).origin, "live");
   assert.equal((migrated.db.prepare("SELECT body FROM deliveries WHERE key = 'old-delivery'").get() as { body: string | null }).body, null);
 });
@@ -146,7 +148,7 @@ test("two processes can open a new database at the same time", async t => {
     for (const result of results) assert.equal(result.status, 0, result.stderr);
     const store = openStore(dir);
     t.after(() => store.close());
-    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 12);
+    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 13);
     assert.deepEqual(tables(store), TABLES);
   }
 });

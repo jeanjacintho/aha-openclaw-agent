@@ -9,6 +9,8 @@ import { stateFromClassification } from "./relevance.ts";
 export const CLASSIFY_BATCH_SIZE = 20;
 // A failed item is classified again on later passes, up to this many attempts in total.
 export const MAX_CLASSIFY_ATTEMPTS = 3;
+// Persistent provider/network failures also need a finite path out of the queue.
+export const MAX_CLASSIFY_TRANSPORT_ATTEMPTS = 10;
 
 export type ItemRow = {
   id: number;
@@ -23,6 +25,7 @@ export type ItemRow = {
   fetched_at: string | null;
   state: string;
   classify_attempts?: number;
+  classify_transport_attempts?: number;
 };
 
 export type ClassifyReport = {
@@ -56,6 +59,16 @@ function aboutAllowed(about: Classification["about"], cfg: AhaConfig) {
 
 function review(store: Store, id: number) {
   store.db.prepare("UPDATE items SET state = 'needs_review', classify_attempts = classify_attempts + 1 WHERE id = ?").run(id);
+}
+
+function recordTransportFailure(store: Store, id: number) {
+  const row = store.db.prepare(`UPDATE items SET
+      classify_transport_attempts = classify_transport_attempts + 1,
+      state = CASE WHEN classify_transport_attempts + 1 >= ? THEN 'needs_review' ELSE state END
+    WHERE id = ? RETURNING classify_transport_attempts`).get(
+    MAX_CLASSIFY_TRANSPORT_ATTEMPTS, id,
+  ) as { classify_transport_attempts: number } | undefined;
+  return (row?.classify_transport_attempts ?? 0) >= MAX_CLASSIFY_TRANSPORT_ATTEMPTS;
 }
 
 function save(store: Store, id: number, c: Classification) {
@@ -96,8 +109,18 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     schema: classifyLlmSchema,
   }, deps);
   if (!result.ok && result.kind === "transport") {
-    console.error(`aha: classify transport failure for ${batch.length} items; will retry next cycle: ${result.reason}`);
+    let exhausted = 0;
+    for (const item of batch) {
+      if (recordTransportFailure(s, item.id)) {
+        exhausted += 1;
+        report.needsReview += 1;
+      }
+    }
+    console.error(`aha: classify transport failure for ${batch.length} items; ${exhausted} reached the ${MAX_CLASSIFY_TRANSPORT_ATTEMPTS}-attempt limit and moved to needs_review, remaining items will retry next cycle: ${result.reason}`);
     return report;
+  }
+  for (const item of batch) {
+    s.db.prepare("UPDATE items SET classify_transport_attempts = 0 WHERE id = ?").run(item.id);
   }
   const byId = new Map<number, Classification>();
   let rejected: string | undefined;

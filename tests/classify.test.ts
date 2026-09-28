@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { classifyBatch, MAX_CLASSIFY_ATTEMPTS, type ItemRow } from "../aha/pipeline/classify.ts";
+import { classifyBatch, MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_TRANSPORT_ATTEMPTS, type ItemRow } from "../aha/pipeline/classify.ts";
 import { classifyNewItems } from "../aha/digest/deliver.ts";
 import { classificationSchema } from "../aha/llm/schemas.ts";
 import { openStore } from "../aha/store/db.ts";
@@ -224,10 +224,29 @@ test("transport failures do not consume attempts and the item recovers on the ne
   }
   assert.deepEqual({ ...itemRow(store, item.id) }, { state: "new", classify_attempts: 0 });
   assert.match(errors[0], /transport failure.*retry next cycle/);
-  assert.doesNotMatch(errors[0], /needs_review/);
+  assert.doesNotMatch(errors[0], /classify sent .*items to needs_review/);
   await classifyNewItems(store, deps);
   assert.equal(calls, 2);
   assert.deepEqual({ ...itemRow(store, item.id) }, { state: "relevant", classify_attempts: 0 });
+  assert.equal((store.db.prepare("SELECT classify_transport_attempts AS n FROM items WHERE id = ?").get(item.id) as { n: number }).n, 0);
+});
+
+test("persistent transport failures eventually move the item to needs_review", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let calls = 0;
+  const deps = {
+    complete: async () => {
+      calls += 1;
+      return { ok: false as const, kind: "transport" as const, reason: "timeout" };
+    },
+  };
+
+  for (let i = 0; i < MAX_CLASSIFY_TRANSPORT_ATTEMPTS + 2; i += 1) await classifyNewItems(store, deps);
+
+  assert.equal(calls, MAX_CLASSIFY_TRANSPORT_ATTEMPTS);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "needs_review", classify_attempts: 0 });
+  assert.equal((store.db.prepare("SELECT classify_transport_attempts AS n FROM items WHERE id = ?").get(item.id) as { n: number }).n, MAX_CLASSIFY_TRANSPORT_ATTEMPTS);
 });
 
 test("content failures stop being retried after the attempt limit", async t => {

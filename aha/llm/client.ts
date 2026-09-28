@@ -25,6 +25,17 @@ export type CompleteResult<T> =
   | { ok: true; value: T }
   | { ok: false; reason: string; kind: "transport" | "content" };
 
+type CompleteFailureKind = "transport" | "content";
+
+class CompleteFailure extends Error {
+  readonly kind: CompleteFailureKind;
+
+  constructor(message: string, kind: CompleteFailureKind) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
 export type CompleteDeps = {
   fetch?: typeof fetch;
   timeoutMs?: number;
@@ -78,11 +89,22 @@ async function callModel(model: string, req: CompleteRequest<unknown>, deps: Com
       }),
       signal,
     });
-    if (!response.ok) throw new Error(`http ${response.status}`);
+  } catch (error) {
+    if (signal.aborted || isTimeout(error)) throw new CompleteFailure("timeout", "transport");
+    throw new CompleteFailure(error instanceof Error ? error.message : "network error", "transport");
+  }
+  if (!response.ok) {
+    const kind = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500
+      ? "transport"
+      : "content";
+    throw new CompleteFailure(`http ${response.status}`, kind);
+  }
+  try {
     return await response.json() as ChatResponse;
   } catch (error) {
-    if (signal.aborted || isTimeout(error)) throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
-    throw error;
+    if (signal.aborted || isTimeout(error)) throw new CompleteFailure("timeout", "transport");
+    const kind = error instanceof SyntaxError ? "content" : "transport";
+    throw new CompleteFailure(error instanceof Error ? error.message : "invalid response json", kind);
   }
 }
 
@@ -162,7 +184,8 @@ export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = 
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown";
-    return { ok: false, reason, kind: "transport" };
+    const kind = error instanceof CompleteFailure ? error.kind : "transport";
+    return { ok: false, reason, kind };
   }
   if (!payload) return { ok: false, reason: "unknown", kind: "transport" };
   try {
