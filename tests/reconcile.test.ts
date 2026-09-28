@@ -32,14 +32,14 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
 }
 
 async function fixture(t: import("node:test").TestContext, options: {
-  attemptAgoMs?: number; posts?: number; uncertainDelayMs?: number; ledgerState?: "uncertain" | "posting";
+  attemptAgoMs?: number; posts?: number; uncertainDelayMs?: number; ledgerState?: "uncertain" | "posting"; language?: "pt" | "en";
 } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-reconcile-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
   const store = openStore(dir);
   t.after(() => store.close());
-  saveConfig(store, { company: { name: "Plow", aliases: ["plow"] }, language: "en", ownerChatUid: "cht_dm" });
+  saveConfig(store, { company: { name: "Plow", aliases: ["plow"] }, language: options.language ?? "en", ownerChatUid: "cht_dm" });
   writeSecrets(dir, { reddit: { clientId: "id", clientSecret: "secret", username: "aha", password: "secret" } });
   const attemptAt = new Date(NOW.getTime() - (options.attemptAgoMs ?? 20 * 60 * 1000));
   const posts: { itemId: number; draftId: number; postKey: string; threadKey: string; externalId: string }[] = [];
@@ -134,6 +134,21 @@ test("an uncertain Reddit post found in the user's comments becomes verified and
   assert.equal(fetch.messages.length, 1);
 });
 
+test("a found post after retry uses a distinct owner-notice key", async t => {
+  const { store, posts, attemptAt } = await fixture(t);
+  const post = posts[0];
+  recordDraftEvent(store, { draftId: post.draftId, itemId: post.itemId, actor: "owner", action: "retried", body: BODY, at: NOW });
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at, body)
+    VALUES (?, 'cht_dm', 'sent', 'original_notice', ?, ?, NULL)`)
+    .run(`reddit-reconcile:found:${post.postKey}`, NOW.toISOString(), NOW.toISOString());
+  const fetch = makeFetcher(() => jsonListing([commentFor(post, attemptAt.getTime() + 60_000)]));
+  const result = await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.deepEqual(result, { checked: 1, reconciled: 1, absent: 0, expired: 0 });
+  assert.equal(fetch.messages.length, 1);
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`reddit-reconcile:found:${post.postKey}`) as { status: string }).status, "sent");
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`reddit-reconcile:found-after-retry:${post.postKey}`) as { status: string }).status, "sent");
+});
+
 test("a comment created before the uncertain event but after approval is still found", async t => {
   const { store, posts, attemptAt } = await fixture(t, { uncertainDelayMs: 30_000 });
   const fetch = makeFetcher(() => jsonListing([commentFor(posts[0], attemptAt.getTime() + 10_000)]));
@@ -183,6 +198,7 @@ test("a covered listing after the grace period marks a post absent", async t => 
   assert.deepEqual({ ...latestEvent(store, posts[0].draftId) }, { action: "absent", detail: null });
   assert.equal(fetch.messages.length, 1);
   assert.match(JSON.parse(fetch.messages[0]).body, /was not found/);
+  assert.match(JSON.parse(fetch.messages[0]).body, new RegExp(`Reply RETRY AHA-${posts[0].itemId} to retry once`));
   assert.equal(await postReply(store, posts[0].draftId, { auth: testAuth, fetch: fetch.fetch, now: () => NOW }), "failed");
   assert.equal(state(store, posts[0].postKey).state, "absent");
 
@@ -194,6 +210,44 @@ test("a covered listing after the grace period marks a post absent", async t => 
     VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId);
   const draft = { id: 999, itemId, body: BODY, state: "pending" };
   assert.deepEqual(checkPolicy(store, draft, NOW), { allow: true });
+});
+
+test("an absent notice after the one retry says manual posting is the remaining option", async t => {
+  const { store, posts } = await fixture(t, { language: "pt" });
+  recordDraftEvent(store, { draftId: posts[0].draftId, itemId: posts[0].itemId, actor: "mem_retry", action: "retried", body: BODY, at: NOW });
+  const fetch = makeFetcher(() => jsonListing([]));
+  await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.equal(state(store, posts[0].postKey).state, "absent");
+  assert.match(JSON.parse(fetch.messages[0]).body, /Não haverá outro reenvio/);
+  assert.match(JSON.parse(fetch.messages[0]).body, /publicar manualmente/);
+  assert.doesNotMatch(JSON.parse(fetch.messages[0]).body, /RETRY AHA-/);
+});
+
+test("an absent notice before retry offers the one resend in Portuguese", async t => {
+  const { store } = await fixture(t, { language: "pt" });
+  const fetch = makeFetcher(() => jsonListing([]));
+  await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.match(JSON.parse(fetch.messages[0]).body, /Responda RETRY AHA-\d+ para reenviar uma única vez/);
+});
+
+test("the final absent notice after retry uses a new idempotency key and is delivered", async t => {
+  const { store, posts } = await fixture(t);
+  const fetch = makeFetcher(() => jsonListing([]));
+  await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => NOW });
+  assert.match(JSON.parse(fetch.messages[0]).body, /RETRY AHA-/);
+  const afterRetryAt = new Date(NOW.getTime() + 20 * 60 * 1000);
+  store.db.prepare("UPDATE ledger SET state = 'uncertain' WHERE key IN (?, ?)").run(posts[0].postKey, posts[0].threadKey);
+  store.db.prepare("UPDATE drafts SET approved_at = ? WHERE id = ?").run(NOW.toISOString(), posts[0].draftId);
+  recordDraftEvent(store, { draftId: posts[0].draftId, itemId: posts[0].itemId, actor: "mem_retry", action: "retried", body: BODY, at: NOW });
+  recordDraftEvent(store, {
+    draftId: posts[0].draftId, itemId: posts[0].itemId, actor: "system", action: "uncertain",
+    body: BODY, detail: "network_error", at: NOW,
+  });
+  await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => afterRetryAt });
+  assert.equal(fetch.messages.length, 2);
+  assert.match(JSON.parse(fetch.messages[1]).body, /will not be retried again/);
+  await reconcileRedditPosts(store, { auth: testAuth, fetch: fetch.fetch, now: () => afterRetryAt });
+  assert.equal(fetch.messages.length, 2);
 });
 
 test("a full listing that does not reach the attempt time keeps the post uncertain", async t => {

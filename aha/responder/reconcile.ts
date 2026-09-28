@@ -155,15 +155,22 @@ async function notifyResolution(store: Store, post: PendingPost, outcome: "found
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
   const lang = getConfig(store)?.language || "en";
+  const retried = Boolean(store.db.prepare("SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'retried' LIMIT 1")
+    .get(post.draftId));
+  const noticeKey = retried ? `${outcome}-after-retry` : outcome;
   const text = outcome === "found"
     ? (lang.startsWith("pt")
       ? `Publicação AHA-${post.itemId} confirmada no Reddit: ${url ?? "link indisponível"}`
       : `AHA-${post.itemId} Reddit publication confirmed: ${url ?? "link unavailable"}`)
     : (lang.startsWith("pt")
-      ? `A publicação AHA-${post.itemId} não foi encontrada no Reddit após a verificação automática.`
-      : `AHA-${post.itemId} was not found on Reddit after automatic verification.`);
+      ? retried
+        ? `A publicação AHA-${post.itemId} não foi encontrada após o reenvio. Não haverá outro reenvio; você pode publicar manualmente.`
+        : `A publicação AHA-${post.itemId} não foi encontrada no Reddit. Responda RETRY AHA-${post.itemId} para reenviar uma única vez.`
+      : retried
+        ? `AHA-${post.itemId} was not found after the retry. It will not be retried again; you may publish manually.`
+        : `AHA-${post.itemId} was not found on Reddit. Reply RETRY AHA-${post.itemId} to retry once.`);
   try {
-    const result: SendResult = await sendToChat(owner, text, `reddit-reconcile:${outcome}:${post.postKey}`, {
+    const result: SendResult = await sendToChat(owner, text, `reddit-reconcile:${noticeKey}:${post.postKey}`, {
       store, fetch: deps.fetch, now: deps.now,
     });
     if (result !== "sent" && result !== "duplicate") {

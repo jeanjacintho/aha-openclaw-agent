@@ -7,6 +7,8 @@ import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { sendToChat } from "../aha/notify/plow.ts";
 import { writeSecrets } from "../aha/secrets.ts";
+import { recordDraftEvent } from "../aha/responder/draft-events.ts";
+import { postLedgerKey, threadLedgerKey } from "../aha/responder/post.ts";
 import { openStore } from "../aha/store/db.ts";
 import entry from "../plugin/index.ts";
 
@@ -104,6 +106,33 @@ function seedReddit(dir: string) {
   const draftId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
   store.close();
   return { itemId, draftId };
+}
+
+function seedAbsentRetry(dir: string, states: { post?: string; thread?: string } = {}) {
+  const store = openStore(dir);
+  const approvedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const url = "https://www.reddit.com/r/test/comments/thread/slug/";
+  const externalId = "t3_thread";
+  const body = "Thanks for asking about Plow queues.\n— AHA, AI assistant of Plow";
+  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
+    VALUES ('reddit', ?, ?, 'alice', 'Plow queues', 'Does plow queue jobs?', ?, ?, 'assigned')`)
+    .run(externalId, url, approvedAt, approvedAt);
+  const itemId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  store.db.prepare(`INSERT INTO classifications (item_id, sentiment, category, topic, language, is_question, urgency, about, confidence)
+    VALUES (?, 0, 'question', 'queues', 'en', 1, 'low', 'self', 0.9)`).run(itemId);
+  const hash = createHash("sha256").update(body).digest("hex");
+  store.db.prepare(`INSERT INTO drafts (item_id, body, state, approved_sha256, approved_at)
+    VALUES (?, ?, 'approved', ?, ?)`)
+    .run(itemId, body, hash, approvedAt);
+  const draftId = Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
+  const postKey = postLedgerKey(approvedAt.slice(0, 10), "reddit", externalId, url);
+  const threadKey = threadLedgerKey("reddit", externalId, url);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, ?, ?)").run(postKey, states.post ?? "absent", url);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, ?, ?)").run(threadKey, states.thread ?? "absent", url);
+  recordDraftEvent(store, { draftId, itemId, actor: "mem_retry", action: "approved", body, at: new Date(approvedAt) });
+  store.db.prepare("INSERT INTO people_roles (person, role) VALUES ('mem_retry', 'marketing')").run();
+  store.close();
+  return { itemId, draftId, body, postKey, threadKey, approvedAt, url };
 }
 
 test("aha_pause blocks group sends immediately and survives a store reopen", async t => {
@@ -256,6 +285,173 @@ test("aha_ignore records the actor but never the free-text reason", async t => {
   assert.equal(event.body_sha256?.length, 64);
   assert.equal(event.detail, null);
   assert.equal(JSON.stringify(event).includes(reason), false);
+});
+
+test("aha_retry posts an absent Reddit approval once and atomically refreshes approved_at", async t => {
+  const redditPosts: string[] = [];
+  const dir = await home(t, [], "posted", undefined, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const before = Date.parse(seeded.approvedAt);
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError ?? false, false);
+  assert.deepEqual(result.details, { sent: true, status: "posted" });
+  assert.equal(redditPosts.length, 1);
+  assert.equal(redditPosts[0], seeded.body);
+
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const retryAt = Date.parse((store.db.prepare("SELECT approved_at AS at FROM drafts WHERE id = ?").get(seeded.draftId) as { at: string }).at);
+  assert.ok(retryAt > before);
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.threadKey) as { state: string }).state, "verified");
+  const retryPostKey = postLedgerKey(new Date(retryAt).toISOString().slice(0, 10), "reddit", "t3_thread", seeded.url);
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(retryPostKey) as { state: string }).state, "verified");
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.postKey) as { state: string }).state, "absent");
+  const retryEvent = store.db.prepare(`SELECT actor, action, body_sha256 FROM draft_events
+    WHERE draft_id = ? AND action = 'retried'`).get(seeded.draftId) as { actor: string; action: string; body_sha256: string };
+  assert.deepEqual({ ...retryEvent }, { actor: "mem_retry", action: "retried", body_sha256: createHash("sha256").update(seeded.body).digest("hex") });
+});
+
+test("an uncertain retry notifies the owner even when the original notice used the same day's post key", async t => {
+  const messages: { url: string; body: string }[] = [];
+  const redditPosts: string[] = [];
+  const dir = await home(t, messages, "uncertain", undefined, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  const now = new Date().toISOString();
+  const retryPostKey = postLedgerKey(now.slice(0, 10), "reddit", "t3_thread", seeded.url);
+  const oldNoticeKey = `uncertain:${retryPostKey}`;
+  store.db.prepare("UPDATE drafts SET approved_at = ? WHERE id = ?").run(now, seeded.draftId);
+  store.db.prepare("DELETE FROM ledger WHERE key = ?").run(seeded.postKey);
+  store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'absent', ?)").run(retryPostKey, seeded.url);
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, message_uid, created_at, updated_at, body)
+    VALUES (?, 'cht_dm', 'sent', 'original_notice', ?, ?, NULL)`).run(oldNoticeKey, now, now);
+  store.close();
+
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.deepEqual(result.details, {
+    sent: false, status: "uncertain", reason: "Reddit outcome is uncertain; reconciliation will check automatically",
+  });
+  assert.equal(redditPosts.length, 1);
+  const notices = messages.filter(message => message.url.includes("/chats/cht_dm/messages") && message.body.includes("Uncertain Reddit post"));
+  assert.equal(notices.length, 1);
+  const after = openStore(dir);
+  t.after(() => after.close());
+  assert.equal((after.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(oldNoticeKey) as { status: string }).status, "sent");
+  assert.equal((after.db.prepare("SELECT status FROM deliveries WHERE key = ?").get(`uncertain-retry:${retryPostKey}`) as { status: string }).status, "sent");
+});
+
+test("aha_retry refuses every ledger state except absent for both keys", async t => {
+  const dir = await home(t);
+  const seeded = seedAbsentRetry(dir);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const disallowed = ["uncertain", "posted", "verified", "failed", "ready"];
+  for (const state of disallowed) {
+    store.db.prepare("UPDATE ledger SET state = ? WHERE key = ?").run(state, seeded.postKey);
+    const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+    assert.equal(result.isError, true, `post state ${state} must be refused`);
+    assert.match(result.content[0].text, new RegExp(state));
+    store.db.prepare("UPDATE ledger SET state = 'absent' WHERE key = ?").run(seeded.postKey);
+  }
+  for (const state of disallowed) {
+    store.db.prepare("UPDATE ledger SET state = ? WHERE key = ?").run(state, seeded.threadKey);
+    const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+    assert.equal(result.isError, true, `thread state ${state} must be refused`);
+    assert.match(result.content[0].text, new RegExp(state));
+    store.db.prepare("UPDATE ledger SET state = 'absent' WHERE key = ?").run(seeded.threadKey);
+  }
+});
+
+test("aha_retry allows only one resend for a draft", async t => {
+  const redditPosts: string[] = [];
+  const dir = await home(t, [], "posted", undefined, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const first = await member.get("aha_retry")!.execute("retry-1", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(first.isError ?? false, false);
+  const second = await member.get("aha_retry")!.execute("retry-2", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /already used its one retry/);
+  assert.equal(redditPosts.length, 1);
+});
+
+test("aha_retry refuses while PAUSE is active", async t => {
+  const dir = await home(t);
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  store.db.prepare("UPDATE flags SET paused = 1 WHERE id = 1").run();
+  store.close();
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PAUSE is active/);
+});
+
+test("aha_retry refuses when daily or community limits are reached", async t => {
+  const dir = await home(t);
+  const seeded = seedAbsentRetry(dir);
+  const today = new Date().toISOString().slice(0, 10);
+  const store = openStore(dir);
+  for (let i = 0; i < 10; i++) {
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posted', NULL)").run(`post:${today}:reddit:other:t3_cap${i}`);
+  }
+  for (let i = 0; i < 3; i++) {
+    store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posted', NULL)").run(`post:${today}:reddit:test:t3_community${i}`);
+  }
+  store.close();
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /daily posting limit reached/);
+  assert.match(result.content[0].text, /community posting limit reached/);
+});
+
+test("aha_retry refuses when the approved body hash no longer matches", async t => {
+  const dir = await home(t);
+  const seeded = seedAbsentRetry(dir);
+  const store = openStore(dir);
+  store.db.prepare("UPDATE drafts SET approved_sha256 = ? WHERE id = ?").run("0".repeat(64), seeded.draftId);
+  store.close();
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /approved draft content changed/);
+});
+
+test("aha_retry does not spend the retry when Reddit cannot post", async t => {
+  const dir = await home(t);
+  const seeded = seedAbsentRetry(dir);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const result = await member.get("aha_retry")!.execute("retry", { draftId: `AHA-${seeded.itemId}` });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /credentials are unavailable/);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal((store.db.prepare("SELECT state FROM ledger WHERE key = ?").get(seeded.postKey) as { state: string }).state, "absent");
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE draft_id = ? AND action = 'retried'").get(seeded.draftId) as { n: number }).n, 0);
+});
+
+test("the retry claim is atomic when two authorized tool calls race", async t => {
+  const redditPosts: string[] = [];
+  const dir = await home(t, [], "posted", undefined, redditPosts);
+  writeSecrets(dir, { reddit: "reddit-token" });
+  const seeded = seedAbsentRetry(dir);
+  const member = tools({ senderIsOwner: false, requesterSenderId: "mem_retry", nativeChannelId: "cht_marketing" });
+  const [first, second] = await Promise.all([
+    member.get("aha_retry")!.execute("retry-1", { draftId: `AHA-${seeded.itemId}` }),
+    member.get("aha_retry")!.execute("retry-2", { draftId: `AHA-${seeded.itemId}` }),
+  ]);
+  assert.equal(Number(first.isError ?? false) + Number(second.isError ?? false), 1);
+  assert.equal(redditPosts.length, 1);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM draft_events WHERE draft_id = ? AND action = 'retried'").get(seeded.draftId) as { n: number }).n, 1);
 });
 
 test("approval, edit, and ignore roll back when their audit event cannot be written", async t => {

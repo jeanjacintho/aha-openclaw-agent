@@ -6,6 +6,7 @@ import { type Store } from "../store/db.ts";
 import { REDDIT_USER_AGENT, withRedditToken } from "../sources/reddit.ts";
 import { RedditAuthError, redditAuth, type RedditAuth } from "../sources/reddit-auth.ts";
 import { withHttpTimeout } from "../sources/http.ts";
+import { postingLimitReasons, postingPaused } from "./policy.ts";
 import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
 import { recordDraftEvent, type DraftEventAction, type DraftEventDetail } from "./draft-events.ts";
 
@@ -27,10 +28,6 @@ const INFO = "https://oauth.reddit.com/api/info";
 
 function ymd(now: Date) {
   return now.toISOString().slice(0, 10);
-}
-
-function paused(store: Store) {
-  return (store.db.prepare("SELECT paused FROM flags WHERE id = 1").get() as { paused: number } | undefined)?.paused !== 0;
 }
 
 function oauthHeaders(token: string) {
@@ -60,7 +57,7 @@ function freezePosting(store: Store, key: string, url: string | null) {
   store.db.prepare("UPDATE ledger SET state = 'uncertain', url = ? WHERE key = ? AND state = 'posting'").run(url, key);
 }
 
-type PostClaimResult = PostResult | "owned" | "already_posted" | "already_absent" | "thread_taken";
+type PostClaimResult = PostResult | "owned" | "already_posted" | "already_absent" | "retry_refused" | "thread_taken";
 
 function claimKeys(store: Store, postKey: string, threadKey: string, url: string | null): PostClaimResult {
   return store.tx(() => {
@@ -86,6 +83,57 @@ function claimKeys(store: Store, postKey: string, threadKey: string, url: string
       if (currentThread === "posted" || currentThread === "verified") return "thread_taken";
       return "uncertain";
     }
+    return "owned";
+  });
+}
+
+type RetryClaim = {
+  originalPostKey: string;
+  retryPostKey: string;
+  threadKey: string;
+  url: string | null;
+  draftId: number;
+  itemId: number;
+  body: string;
+  approvedSha256: string;
+  approvedAt: string;
+  actor: string;
+};
+
+function claimAbsentRetry(store: Store, claim: RetryClaim): PostClaimResult {
+  return store.tx(() => {
+    const originalPost = ledgerState(store, claim.originalPostKey);
+    const thread = ledgerState(store, claim.threadKey);
+    if (originalPost?.state !== "absent" || thread?.state !== "absent") return "retry_refused";
+    if (store.db.prepare("SELECT 1 FROM draft_events WHERE draft_id = ? AND action = 'retried' LIMIT 1").get(claim.draftId)) {
+      return "retry_refused";
+    }
+    if (postingPaused(store) || postingLimitReasons(store, claim.itemId, new Date(claim.approvedAt)).length > 0) return "retry_refused";
+    if (claim.retryPostKey !== claim.originalPostKey && ledgerState(store, claim.retryPostKey)) return "retry_refused";
+    const draftUpdate = store.db.prepare(`UPDATE drafts SET approved_at = ?
+      WHERE id = ? AND state = 'approved' AND body = ? AND approved_sha256 = ?`)
+      .run(claim.approvedAt, claim.draftId, claim.body, claim.approvedSha256);
+    if (draftUpdate.changes !== 1) return "retry_refused";
+    if (claim.retryPostKey === claim.originalPostKey) {
+      const postUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state = 'absent'")
+        .run(claim.url, claim.originalPostKey);
+      if (postUpdate.changes !== 1) throw new Error("absent post key changed during retry claim");
+    } else {
+      const inserted = store.db.prepare("INSERT INTO ledger (key, state, url) VALUES (?, 'posting', ?)")
+        .run(claim.retryPostKey, claim.url);
+      if (inserted.changes !== 1) throw new Error("retry post key could not be claimed");
+    }
+    const threadUpdate = store.db.prepare("UPDATE ledger SET state = 'posting', url = ? WHERE key = ? AND state = 'absent'")
+      .run(claim.url, claim.threadKey);
+    if (threadUpdate.changes !== 1) throw new Error("absent thread key changed during retry claim");
+    recordDraftEvent(store, {
+      draftId: claim.draftId,
+      itemId: claim.itemId,
+      actor: claim.actor,
+      action: "retried",
+      body: claim.body,
+      at: new Date(claim.approvedAt),
+    });
     return "owned";
   });
 }
@@ -138,7 +186,7 @@ async function verify(
   return { status: "verified" };
 }
 
-async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps) {
+async function notifyUncertain(store: Store, itemId: number, key: string, deps: PostDeps, isRetry = false) {
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
   const lang = getConfig(store)?.language || "en";
@@ -146,7 +194,7 @@ async function notifyUncertain(store: Store, itemId: number, key: string, deps: 
     ? `Post incerto AHA-${itemId}. Vou conferir automaticamente e aviso você quando houver uma confirmação.`
     : `Uncertain Reddit post for AHA-${itemId}. I will check automatically and let you know when it is resolved.`;
   try {
-    await sendToChat(owner, text, `uncertain:${key}`, { store, fetch: deps.fetch, now: deps.now });
+    await sendToChat(owner, text, `${isRetry ? "uncertain-retry" : "uncertain"}:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
     /* unit tests may omit Plow env */
   }
@@ -159,6 +207,7 @@ async function notifyVerificationMismatch(
   detail: "parent_mismatch" | "body_mismatch" | "author_mismatch" | "removed",
   url: string | null,
   deps: PostDeps,
+  isRetry = false,
 ) {
   const owner = getConfig(store)?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
   if (!owner) return;
@@ -173,7 +222,7 @@ async function notifyVerificationMismatch(
     ? `Verificação do post AHA-${itemId}: ${reason.pt}. Confira: ${url ?? "link indisponível"}`
     : `AHA-${itemId} post verification: ${reason.en}. Check: ${url ?? "link unavailable"}`;
   try {
-    await sendToChat(owner, text, `verify:${key}`, { store, fetch: deps.fetch, now: deps.now });
+    await sendToChat(owner, text, `${isRetry ? "verify-retry" : "verify"}:${key}`, { store, fetch: deps.fetch, now: deps.now });
   } catch {
     /* unit tests may omit Plow env */
   }
@@ -192,6 +241,14 @@ function releaseReadyReservation(store: Store, postKey: string, threadKey: strin
 }
 
 export async function postReply(store: Store, draftId: number, deps: PostDeps = {}): Promise<PostResult> {
+  return postReplyInternal(store, draftId, deps);
+}
+
+export async function retryAbsentPost(store: Store, draftId: number, actor: string, deps: PostDeps = {}): Promise<PostResult> {
+  return postReplyInternal(store, draftId, deps, actor);
+}
+
+async function postReplyInternal(store: Store, draftId: number, deps: PostDeps, retryActor?: string): Promise<PostResult> {
   const draft = store.db.prepare(`SELECT id, item_id AS itemId, body, state,
       approved_sha256 AS approvedSha256, approved_at AS approvedAt FROM drafts WHERE id = ?`).get(draftId) as Draft | undefined;
   if (!draft) return "failed";
@@ -211,8 +268,8 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   const now = deps.now?.() ?? new Date();
   const approvedAt = draft.approvedAt ? new Date(draft.approvedAt) : undefined;
   const reservationDay = approvedAt && Number.isFinite(approvedAt.getTime()) ? approvedAt : now;
-  const day = ymd(reservationDay);
-  const key = postLedgerKey(day, item.source, item.externalId, item.url);
+  const originalPostKey = postLedgerKey(ymd(reservationDay), item.source, item.externalId, item.url);
+  const key = postLedgerKey(ymd(retryActor ? now : reservationDay), item.source, item.externalId, item.url);
   const thread = threadLedgerKey(item.source, item.externalId, item.url);
   const approvedHashMatches = Boolean(draft.approvedSha256)
     && createHash("sha256").update(draft.body).digest("hex") === draft.approvedSha256;
@@ -221,14 +278,19 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     event("post_refused", draft.state !== "approved" ? "not_approved" : "hash_mismatch");
     return "failed";
   }
-  if (paused(store)) {
+  if (postingPaused(store)) {
     releaseReadyReservation(store, key, thread, item.url);
     event("post_refused", "paused");
     return "failed";
   }
-  const claimed = claimKeys(store, key, thread, item.url);
+  const claimed = retryActor
+    ? claimAbsentRetry(store, {
+      originalPostKey, retryPostKey: key, threadKey: thread, url: item.url, draftId: draft.id,
+      itemId: draft.itemId, body: draft.body, approvedSha256: draft.approvedSha256!, approvedAt: now.toISOString(), actor: retryActor,
+    })
+    : claimKeys(store, key, thread, item.url);
   if (claimed !== "owned") {
-    if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    if (claimed === "uncertain") await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     if (claimed === "already_posted") {
       event("post_refused", "already_posted");
       return "posted";
@@ -238,6 +300,10 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
       return "failed";
     }
     if (claimed === "already_absent") {
+      event("post_refused", "already_absent");
+      return "failed";
+    }
+    if (claimed === "retry_refused") {
       event("post_refused", "already_absent");
       return "failed";
     }
@@ -270,7 +336,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     }
     finish(store, key, thread, "uncertain", item.url);
     event("uncertain", "network_error");
-    await notifyUncertain(store, draft.itemId, key, deps);
+    await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return "uncertain";
   }
   if (response.status === 401 || response.status === 403) {
@@ -282,7 +348,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     const next = response.status >= 500 ? "uncertain" : "failed";
     finish(store, key, thread, next, item.url);
     event(next, `http_${response.status}`);
-    if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps);
+    if (next === "uncertain") await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return next;
   }
   let parsed: { id: string; permalink?: string } | undefined;
@@ -291,7 +357,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   } catch {
     finish(store, key, thread, "uncertain", item.url);
     event("uncertain", "response_invalid");
-    await notifyUncertain(store, draft.itemId, key, deps);
+    await notifyUncertain(store, draft.itemId, key, deps, Boolean(retryActor));
     return "uncertain";
   }
   if (!parsed) {
@@ -317,7 +383,7 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
     event("verified");
   } else if (verification.status === "mismatch") {
     event("verify_mismatch", verification.detail);
-    await notifyVerificationMismatch(store, draft.itemId, key, verification.detail, postedUrl, deps);
+    await notifyVerificationMismatch(store, draft.itemId, key, verification.detail, postedUrl, deps, Boolean(retryActor));
   } else {
     event("verify_unavailable", "verify_unavailable");
   }
