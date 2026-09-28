@@ -47,7 +47,7 @@ function weekKnown(store: Store, start: Date, end: Date, expected: string[]) {
     "SELECT source, status FROM source_runs WHERE window_end > ? AND window_start < ?",
   ).all(start.toISOString(), end.toISOString()) as { source: string; status: string }[];
   const ok = new Set(rows.filter(row => row.status === "ok").map(row => row.source));
-  return expected.every(source => ok.has(source));
+  return expected.some(source => ok.has(source));
 }
 
 type Hit = { source: string; topic: string; state: string; about: string | null };
