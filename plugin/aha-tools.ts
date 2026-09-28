@@ -554,7 +554,7 @@ export function registerAhaTools(api: {
   api.registerTool(ctx => ({
     name: "aha_digest_now",
     label: "Send the AHA digest now",
-    description: "Classify pending items and send the digest to the owner DM. Owner only. Returns {sent:true} without digest text, or {sent:false, reason} if delivery was duplicate or uncertain.",
+    description: "Classify pending items and send the digest only to the owner DM. Owner only. Returns {sent:true} without digest text, or {sent:false, reason} if delivery was duplicate or uncertain.",
     parameters: { type: "object", additionalProperties: false, properties: {} },
     async execute() {
       const denied = requireOwner(ctx);
@@ -562,7 +562,7 @@ export function registerAhaTools(api: {
       const store = openStore();
       try {
         const at = new Date();
-        const result = await deliverDigest(store, { now: () => at, key: digestNowKey(at) });
+        const result = await deliverDigest(store, { now: () => at, key: digestNowKey(at), ownerOnly: true });
         if (result === "failed") return fail("digest failed");
         return ok(digestSendReply(result));
       } catch (error) {

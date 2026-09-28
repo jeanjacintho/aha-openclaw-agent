@@ -63,7 +63,7 @@ export function digestSendReply(result: SendResult): { sent: true } | { sent: fa
   return { sent: false, reason: result };
 }
 
-export async function deliverDigest(store: Store, deps: SendDeps & ClassifyDeps & { key?: string } = {}): Promise<SendResult> {
+export async function deliverDigest(store: Store, deps: SendDeps & ClassifyDeps & { key?: string; ownerOnly?: boolean } = {}): Promise<SendResult> {
   await classifyNewItems(store, deps);
   const cfg = getConfig(store);
   const ownerDm = cfg?.ownerChatUid || process.env.AHA_OWNER_CHAT_UID;
@@ -76,6 +76,7 @@ export async function deliverDigest(store: Store, deps: SendDeps & ClassifyDeps 
   const dmResult = await sendToChat(ownerDm, renderDigest(founder, lang), dmKey, {
     store, fetch: deps.fetch, now: deps.now,
   });
+  if (deps.ownerOnly) return dmResult;
   for (const role of ROLES) {
     const chat = cfg?.roleChats?.[role];
     if (!chat || chat === ownerDm) continue;
