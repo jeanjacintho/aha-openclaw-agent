@@ -43,15 +43,17 @@ test("migration creates every table and a second open does nothing", async t => 
   assert.deepEqual(tables(first), TABLES);
   assert.deepEqual(columns(first, "source_runs"), ["id", "source", "window_start", "window_end", "status", "detail"]);
   assert.deepEqual(columns(first, "deliveries"), ["key", "chat_uid", "status", "message_uid", "created_at", "updated_at", "body"]);
-  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 14);
+  assert.equal((first.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 15);
   assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'forget_audit_target_hash_idx'").get() as { name: string }).name, "forget_audit_target_hash_idx");
   assert.equal(columns(first, "drafts").includes("edited"), true);
   assert.equal(columns(first, "items").includes("assignee"), true);
   assert.equal(columns(first, "items").includes("draft_attempts"), true);
   assert.equal(columns(first, "items").includes("classify_attempts"), true);
   assert.equal(columns(first, "items").includes("classify_transport_attempts"), true);
+  assert.equal(columns(first, "items").includes("classify_claimed_until"), true);
   assert.equal(columns(first, "items").includes("origin"), true);
   assert.equal(columns(first, "deliveries").includes("body"), true);
+  assert.equal((first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'drafts_one_active_per_item_idx'").get() as { name: string }).name, "drafts_one_active_per_item_idx");
   first.db.prepare("INSERT INTO items (source, external_id) VALUES (?, ?)").run("hn", "1");
   assert.equal((first.db.prepare("SELECT origin FROM items WHERE external_id = '1'").get() as { origin: string }).origin, "live");
   assert.equal((first.db.prepare("SELECT classify_transport_attempts FROM items WHERE external_id = '1'").get() as { classify_transport_attempts: number }).classify_transport_attempts, 0);
@@ -69,15 +71,18 @@ test("migration adds origin to an existing database and defaults old rows to liv
   const previousSql = await Promise.all(previousMigrations.map(name => fs.readFile(new URL(name, migrationDir), "utf8")));
   const previous = openStore(dir, previousSql);
   previous.db.prepare("INSERT INTO items (source, external_id) VALUES ('hn', 'old-row')").run();
+  previous.db.prepare("INSERT INTO drafts (item_id, body, state) SELECT id, 'older draft', 'pending' FROM items WHERE external_id = 'old-row'").run();
+  previous.db.prepare("INSERT INTO drafts (item_id, body, state) SELECT id, 'newer draft', 'pending' FROM items WHERE external_id = 'old-row'").run();
   previous.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at)
     VALUES ('old-delivery', 'cht_dm', 'sent', '2026-09-22T00:00:00.000Z', '2026-09-22T00:00:00.000Z')`).run();
   previous.close();
 
   const migrated = openStore(dir);
   t.after(() => migrated.close());
-  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 14);
+  assert.equal((migrated.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 15);
   assert.equal((migrated.db.prepare("SELECT origin FROM items WHERE external_id = 'old-row'").get() as { origin: string }).origin, "live");
   assert.equal((migrated.db.prepare("SELECT body FROM deliveries WHERE key = 'old-delivery'").get() as { body: string | null }).body, null);
+  assert.equal((migrated.db.prepare("SELECT body FROM drafts WHERE item_id = (SELECT id FROM items WHERE external_id = 'old-row') AND state = 'pending'").get() as { body: string }).body, "newer draft");
 });
 
 test("a duplicate source and external id is rejected", async t => {
@@ -149,7 +154,7 @@ test("two processes can open a new database at the same time", async t => {
     for (const result of results) assert.equal(result.status, 0, result.stderr);
     const store = openStore(dir);
     t.after(() => store.close());
-    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 14);
+    assert.equal((store.db.prepare("SELECT schema_version FROM meta").get() as { schema_version: number }).schema_version, 15);
     assert.deepEqual(tables(store), TABLES);
   }
 });

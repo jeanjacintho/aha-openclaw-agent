@@ -274,3 +274,45 @@ test("content failures stop being retried after the attempt limit", async t => {
   assert.equal(calls, MAX_CLASSIFY_ATTEMPTS);
   assert.deepEqual({ ...itemRow(store, item.id) }, { state: "needs_review", classify_attempts: MAX_CLASSIFY_ATTEMPTS });
 });
+
+test("concurrent classifyNewItems calls claim a batch only once", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let calls = 0;
+  const deps = {
+    complete: async () => {
+      calls += 1;
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return { ok: true as const, value: { results: [{ id: item.id, ...valid() }] } };
+    },
+  };
+
+  await Promise.all([classifyNewItems(store, deps), classifyNewItems(store, deps)]);
+
+  assert.equal(calls, 1);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "relevant", classify_attempts: 0 });
+  assert.equal((store.db.prepare("SELECT classify_claimed_until FROM items WHERE id = ?").get(item.id) as { classify_claimed_until: string | null }).classify_claimed_until, null);
+});
+
+test("a classification claim expires so work abandoned by a crashed process is retried", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let now = new Date("2026-09-23T12:00:00.000Z");
+  store.db.prepare("UPDATE items SET classify_claimed_until = ? WHERE id = ?")
+    .run(new Date(now.getTime() + 2 * 60 * 1000).toISOString(), item.id);
+  let calls = 0;
+  const deps = {
+    now: () => now,
+    complete: async () => {
+      calls += 1;
+      return { ok: true as const, value: { results: [{ id: item.id, ...valid() }] } };
+    },
+  };
+
+  await classifyNewItems(store, deps);
+  assert.equal(calls, 0);
+  now = new Date(now.getTime() + 3 * 60 * 1000);
+  await classifyNewItems(store, deps);
+  assert.equal(calls, 1);
+  assert.equal(itemRow(store, item.id).state, "relevant");
+});

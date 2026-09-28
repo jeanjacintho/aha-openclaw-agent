@@ -228,6 +228,29 @@ test("an ignored item is not drafted again", async t => {
   assert.equal((store.db.prepare("SELECT state FROM drafts WHERE item_id = ?").get(itemId) as { state: string }).state, "ignored");
 });
 
+test("concurrent draftAndNotify calls create one active draft without counting a race as failure", async t => {
+  const store = await home(t);
+  const itemId = insertItem(store);
+  let completed = 0;
+  let release!: () => void;
+  const bothCompleted = new Promise<void>(resolve => { release = resolve; });
+  const deps = {
+    now,
+    complete: async () => {
+      completed += 1;
+      if (completed === 2) release();
+      await bothCompleted;
+      return { ok: true as const, value: { body: "Thanks for asking about Plow queues." } };
+    },
+  };
+
+  await Promise.all([draftAndNotify(store, deps), draftAndNotify(store, deps)]);
+
+  assert.equal(completed, 2);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts WHERE item_id = ? AND state IN ('pending', 'approved', 'ignored')").get(itemId) as { n: number }).n, 1);
+  assert.equal((store.db.prepare("SELECT draft_attempts FROM items WHERE id = ?").get(itemId) as { draft_attempts: number }).draft_attempts, 0);
+});
+
 test("a red-line item is escalated and sent to the routed role group", async t => {
   const store = await home(t);
   plowEnv(t);
