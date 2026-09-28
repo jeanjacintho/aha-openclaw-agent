@@ -5,12 +5,14 @@ import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { request, listen, accepts, ownerChat, HttpError, DeliveryUnknownError, type Account, type Chat, type Message, type TurnOutcome } from "./transport.ts";
 import { registerAhaTools } from "./aha-tools.ts";
 import { gateContext, isOwnerDm, isOwnerDmTurn, runGate, skipReason } from "./setup-gate.ts";
+import { createPeerLoopGuard } from "./peer-loop.ts";
 
 let runtime: PluginRuntime;
 type ActiveTurn = { chat: Chat; messageUid: string; accountId?: string; deliveryUnknown?: boolean; replyDelivered?: boolean };
 const activeTurn = new AsyncLocalStorage<ActiveTurn>();
 const shared = globalThis as typeof globalThis & { plowActiveTurns?: Map<string, ActiveTurn> };
 const activeTurns = (shared.plowActiveTurns ??= new Map<string, ActiveTurn>());
+const suppressPeerLoop = createPeerLoopGuard();
 
 async function requestWithDeliveryState<T>(account: Account, path: string, body: unknown, turn = activeTurn.getStore()): Promise<T> {
   if (turn?.deliveryUnknown) throw new DeliveryUnknownError();
@@ -48,6 +50,7 @@ async function send(account: Account, to: string, text: string, mediaUrls: strin
 
 async function receive(account: Account, cfg: OpenClawConfig, chat: Chat, message: Message, firstContact: boolean, history: Message[], log: (text: string) => void): Promise<TurnOutcome> {
   const sender = message.sender;
+  if (suppressPeerLoop(chat.uid, sender, log)) return "completed";
   const senderId = sender.type === "member" ? sender.uid : sender.line.uid;
   const senderIsOwner = sender.type === "member" && chat.participants.some(p => p.type === "member" && p.uid === senderId && p.role === "owner");
   const senderName = sender.type === "member" ? sender.display_name : sender.line.display_name;
