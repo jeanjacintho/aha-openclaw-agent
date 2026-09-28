@@ -95,6 +95,10 @@ export async function classifyBatch(s: Store, items: ItemRow[], deps: ClassifyDe
     data: { posts: postsFor(batch) },
     schema: classifyLlmSchema,
   }, deps);
+  if (!result.ok && result.kind === "transport") {
+    console.error(`aha: classify transport failure for ${batch.length} items; will retry next cycle: ${result.reason}`);
+    return report;
+  }
   const byId = new Map<number, Classification>();
   let rejected: string | undefined;
   if (result.ok) {

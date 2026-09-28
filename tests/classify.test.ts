@@ -203,14 +203,41 @@ test("a failed item is retried on later passes and recovers once the model answe
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM classifications").get() as { n: number }).n, 1);
 });
 
-test("an item that keeps failing stops being retried after the attempt limit", async t => {
+test("transport failures do not consume attempts and the item recovers on the next cycle", async t => {
   const store = await home(t);
   const item = insert(store);
   let calls = 0;
   const deps = {
     complete: async () => {
       calls += 1;
-      return { ok: false as const, reason: "http 503" };
+      if (calls === 1) return { ok: false as const, kind: "transport" as const, reason: "http 503" };
+      return { ok: true as const, value: { results: [{ id: item.id, ...valid() }] } };
+    },
+  };
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (line: string) => { errors.push(String(line)); };
+  try {
+    await classifyNewItems(store, deps);
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "new", classify_attempts: 0 });
+  assert.match(errors[0], /transport failure.*retry next cycle/);
+  assert.doesNotMatch(errors[0], /needs_review/);
+  await classifyNewItems(store, deps);
+  assert.equal(calls, 2);
+  assert.deepEqual({ ...itemRow(store, item.id) }, { state: "relevant", classify_attempts: 0 });
+});
+
+test("content failures stop being retried after the attempt limit", async t => {
+  const store = await home(t);
+  const item = insert(store);
+  let calls = 0;
+  const deps = {
+    complete: async () => {
+      calls += 1;
+      return { ok: false as const, kind: "content" as const, reason: "invalid json" };
     },
   };
   for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS + 2; i += 1) await classifyNewItems(store, deps);

@@ -36,8 +36,8 @@ try {
   await syncConfig(config, "/var/lib/plow/openclaw.json", "/etc/plow/openclaw");
   console.log(`plow-boot: identity resolved to ${identity.line.uid}`);
   startAgentIndex(300_000, undefined, writeLog);
-  startAha();
   await startGateway(false, identity.mcp_url ?? undefined, writeLog);
+  startAha();
 } catch (error) {
   console.error(`plow-boot: parked: ${error instanceof Error ? error.message : String(error)}`);
   setInterval(() => {}, 2 ** 30);

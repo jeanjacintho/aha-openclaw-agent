@@ -21,7 +21,9 @@ export type CompleteRequest<T> = {
   schema: Schema<T>;
 };
 
-export type CompleteResult<T> = { ok: true; value: T } | { ok: false; reason: string };
+export type CompleteResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: string; kind: "transport" | "content" };
 
 export type CompleteDeps = {
   fetch?: typeof fetch;
@@ -160,9 +162,9 @@ export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = 
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown";
-    return { ok: false, reason };
+    return { ok: false, reason, kind: "transport" };
   }
-  if (!payload) return { ok: false, reason: "unknown" };
+  if (!payload) return { ok: false, reason: "unknown", kind: "transport" };
   try {
     record(model, req.purpose, payload);
     const content = contentOf(payload);
@@ -175,6 +177,6 @@ export async function complete<T>(req: CompleteRequest<T>, deps: CompleteDeps = 
     }
     return { ok: true, value: req.schema.parse(json) };
   } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : "invalid json" };
+    return { ok: false, reason: error instanceof Error ? error.message : "invalid json", kind: "content" };
   }
 }
