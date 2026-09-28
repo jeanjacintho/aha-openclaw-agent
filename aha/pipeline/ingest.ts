@@ -89,7 +89,6 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
   const cfg = getConfig(store);
   if (!cfg) return { sources: [] };
   const query = queryFor(cfg, now, window);
-  const origin = window ? "backfill" : "live";
   const sources: IngestReport["sources"] = [];
   for (const adapter of adapters) {
     if (!adapter.enabled(cfg)) continue;
@@ -108,6 +107,10 @@ export async function runIngest(store: Store, adapters: SourceAdapter[], now: Da
         }
         for (const item of result.items) {
           if (!passesFilter1(item, cfg)) continue;
+          const publishedAt = Date.parse(item.publishedAt);
+          const origin = window && (!Number.isFinite(publishedAt) || publishedAt < now.getTime() - DAY_MS)
+            ? "backfill"
+            : "live";
           stored += Number(insertItem(store, item, now, origin));
         }
         cursor = result.nextCursor;

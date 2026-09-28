@@ -9,6 +9,7 @@ import { openStore } from "../aha/store/db.ts";
 import { type FetchResult, type SourceAdapter, type SourceQuery } from "../aha/sources/types.ts";
 
 const now = new Date("2026-09-22T18:00:00.000Z");
+const oldPublishedAt = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 async function home(t: import("node:test").TestContext) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-backfill-"));
@@ -24,7 +25,7 @@ function item(id: string): FetchResult {
     ok: true,
     items: [{
       source: "hn", externalId: id, url: `https://news.ycombinator.com/item?id=${id}`,
-      author: "a", body: "plow mention", publishedAt: now.toISOString(),
+      author: "a", body: "plow mention", publishedAt: oldPublishedAt,
     }],
     nextCursor: null,
   };
@@ -51,7 +52,7 @@ test("backfill follows source cursors and does not duplicate", async t => {
           ok: true,
           items: [{
             source: "hn", externalId: "a", url: "https://news.ycombinator.com/item?id=a",
-            author: "a", body: "plow one", publishedAt: now.toISOString(),
+            author: "a", body: "plow one", publishedAt: oldPublishedAt,
           }],
           nextCursor: "p2",
         };
@@ -60,7 +61,7 @@ test("backfill follows source cursors and does not duplicate", async t => {
         ok: true,
         items: [{
           source: "hn", externalId: "b", url: "https://news.ycombinator.com/item?id=b",
-          author: "a", body: "plow two", publishedAt: now.toISOString(),
+          author: "a", body: "plow two", publishedAt: oldPublishedAt,
         }],
         nextCursor: null,
       };
@@ -80,6 +81,29 @@ test("backfill follows source cursors and does not duplicate", async t => {
   const until = queries[0].until.getTime();
   assert.equal(until, now.getTime());
   assert.equal(until - since, 30 * 24 * 60 * 60 * 1000);
+});
+
+test("backfill keeps items from the last 24 hours live", async t => {
+  const store = await home(t);
+  const recentPublishedAt = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const adapter: SourceAdapter = {
+    id: "hn",
+    enabled: () => true,
+    async fetch() {
+      return {
+        ok: true,
+        items: [{
+          source: "hn", externalId: "recent", url: "https://news.ycombinator.com/item?id=recent",
+          author: "a", body: "plow mention", publishedAt: recentPublishedAt,
+        }],
+        nextCursor: null,
+      };
+    },
+  };
+
+  await runBackfill(store, [adapter], 30, now);
+
+  assert.equal((store.db.prepare("SELECT origin FROM items WHERE external_id = 'recent'").get() as { origin: string }).origin, "live");
 });
 
 test("a 1-day backfill uses a 24h window", async t => {
