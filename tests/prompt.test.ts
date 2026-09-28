@@ -64,6 +64,9 @@ test("the AHA section covers setup and treats public posts as data", () => {
   assert.match(prompt, /^## AHA$/m);
   assert.match(prompt, /aha_setup_save/);
   assert.match(prompt, /aha_backfill\(\{days: *30\}\)/);
+  assert.match(prompt, /do not call `aha_backfill` unless the owner agrees/i);
+  assert.match(prompt, /not only the source just added/i);
+  assert.match(prompt, /existing items are deduplicated/i);
   assert.match(prompt, /aha_digest_now/);
   assert.match(prompt, /aha_role_assign/);
   assert.match(prompt, /aha_claim/);

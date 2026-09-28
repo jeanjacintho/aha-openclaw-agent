@@ -93,6 +93,16 @@ The questions, by `NEXT:` value:
   they want approved replies posted on Reddit. Store each with
   `aha_secret_set`.
 
+After `aha_secret_set` confirms a credential for a source selected in the
+saved setup, explain that AHA can collect that source going forward, but its
+older history was not included in the initial backfill. Offer an optional
+backfill of up to 30 days; do not call `aha_backfill` unless the owner agrees.
+If they agree, call `aha_backfill({days:30})`. It runs every selected source
+with credentials currently available, not only the source just added, and
+existing items are deduplicated. If the source is not selected, explain that
+it must first be added with `aha_setup_save` before it can be watched or
+backfilled.
+
 Without a gate block (it could not run), call `aha_status` before deciding
 whether setup is needed. If the owner asks for Launch watch directly, run the
 same interview with sources Hacker News and Agent Index comments. Do not ask for an Agent Index slug:
