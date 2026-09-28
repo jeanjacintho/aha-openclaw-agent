@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
 import { checkPromises, parseDue, runPromiseChecks } from "../aha/promises/check.ts";
+import { DELIVERY_RETRY_GRACE_MS, retryUncertainDeliveries } from "../aha/notify/plow.ts";
 import { openStore } from "../aha/store/db.ts";
 import entry from "../plugin/index.ts";
 
@@ -293,6 +294,39 @@ test("checkPromises counts an assigned item in the after window", async t => {
   const result = checkPromises(store, checkAt)[0];
   assert.equal(result.after, 3);
   assert.equal(result.result, "resolvida");
+});
+
+test("promise topic matching handles reordered words and inflection", async t => {
+  const dir = await home(t);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `before-${i}`, published: "2026-09-22T00:00:00.000Z", topic: "CSV export" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `after-${i}`, published: "2026-09-28T00:00:00.000Z", topic: "CSV export" });
+  seedOpen(dir, "exportar CSV");
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const [result] = checkPromises(store, checkAt);
+  assert.equal(result.before, 6);
+  assert.equal(result.after, 3);
+  assert.equal(result.result, "resolvida");
+});
+
+test("a promise closes after its uncertain notification is retried successfully", async t => {
+  const dir = await home(t);
+  for (let i = 0; i < 6; i++) mention(dir, { ext: `before-${i}`, published: "2026-09-22T00:00:00.000Z", topic: "login", category: "bug" });
+  for (let i = 0; i < 3; i++) mention(dir, { ext: `after-${i}`, published: "2026-09-28T00:00:00.000Z", topic: "login", category: "bug" });
+  seedOpen(dir);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const fail = async () => new Response("gateway error", { status: 500 });
+  await runPromiseChecks(store, checkAt, { now: () => checkAt, fetch: fail });
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "open");
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS count FROM deliveries WHERE key LIKE 'promise:%' AND status = 'uncertain'").get() as { count: number }).count, 2);
+
+  const retryAt = new Date(checkAt.getTime() + DELIVERY_RETRY_GRACE_MS + 1);
+  const retry = await retryUncertainDeliveries(store, retryAt, { fetch: async () => Response.json({ uid: "sent" }) });
+  assert.equal(retry, 2);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS count FROM deliveries WHERE key LIKE 'promise:%' AND status = 'sent'").get() as { count: number }).count, 2);
+  await runPromiseChecks(store, retryAt, { now: () => retryAt, fetch: async () => Response.json({ uid: "duplicate" }) });
+  assert.equal((store.db.prepare("SELECT status FROM promises").get() as { status: string }).status, "resolvida");
 });
 
 test("checkPromises counts an escalated high item and does not mark resolvida", async t => {
