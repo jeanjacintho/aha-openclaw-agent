@@ -35,15 +35,32 @@ export function parseDue(due: string): Date {
 
 const COUNTED_STATES = new Set(["relevant", "assigned", "escalated"]);
 
+function topicsMatch(leftTopic: string, rightTopic: string) {
+  const left = [...new Set(normalizeTopic(leftTopic).split(" ").filter(Boolean))];
+  const right = [...new Set(normalizeTopic(rightTopic).split(" ").filter(Boolean))];
+  if (!left.length || !right.length) return false;
+  const matchedRight = new Set<number>();
+  let overlap = 0;
+  for (const word of left) {
+    const index = right.findIndex((candidate, i) => !matchedRight.has(i) && (
+      word === candidate || (Math.min(word.length, candidate.length) >= 4 && (word.startsWith(candidate) || candidate.startsWith(word)))
+    ));
+    if (index >= 0) {
+      matchedRight.add(index);
+      overlap++;
+    }
+  }
+  return overlap / (left.length + right.length - overlap) >= 0.5;
+}
+
 function windowCounts(store: Store, topic: string, start: Date, end: Date) {
-  const want = normalizeTopic(topic);
   const rows = store.db.prepare(`SELECT items.state AS state, classifications.topic AS topic, classifications.about AS about, classifications.urgency AS urgency, classifications.category AS category
     FROM items
     JOIN classifications ON classifications.item_id = items.id
     WHERE items.published_at >= ? AND items.published_at < ?`).all(start.toISOString(), end.toISOString()) as {
     state: string; topic: string | null; about: string | null; urgency: string | null; category: string | null;
   }[];
-  const hits = rows.filter(row => COUNTED_STATES.has(row.state) && row.about === "self" && normalizeTopic(row.topic ?? "") === want);
+  const hits = rows.filter(row => COUNTED_STATES.has(row.state) && row.about === "self" && topicsMatch(topic, row.topic ?? ""));
   return {
     count: hits.length,
     high: hits.some(row => row.urgency === "high"),
