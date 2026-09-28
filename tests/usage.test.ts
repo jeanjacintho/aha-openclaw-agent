@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { exportLedger } from "../aha/usage/ledger-export.ts";
 import { dailyTotals, listUsage, recordUsage, type UsageCall } from "../aha/usage/ledger.ts";
+import { classifyAllowed, warnBudgetIfNeeded } from "../aha/usage/budget.ts";
+import { openStore } from "../aha/store/db.ts";
 
 const environment = { ...process.env };
 function env(t: import("node:test").TestContext, values: Record<string, string | undefined>) {
@@ -58,6 +60,25 @@ test("negative and NaN usage is rejected and not stored", async t => {
   }
   assert.throws(() => recordUsage(call({ output: -1 })), /usage output must be a finite number >= 0/);
   await assert.rejects(fs.stat(path.join(home, "usage.jsonl")));
+});
+
+test("malformed ledger lines are logged and skipped without breaking budget reads", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "aha-usage-corrupt-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  env(t, { AHA_HOME: home });
+  const validBefore = { id: "before", at: "2026-09-22T10:00:00.000Z", model: "test", input: 2, output: 3, purpose: "classify" };
+  const validAfter = { id: "after", at: "2026-09-22T11:00:00.000Z", model: "test", input: 4, output: 5, purpose: "draft" };
+  await fs.writeFile(path.join(home, "usage.jsonl"), `${JSON.stringify(validBefore)}\n{broken json\nnull\n${JSON.stringify(validAfter)}\n`);
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => { errors.push(line); });
+
+  assert.deepEqual(listUsage(), [validBefore, validAfter]);
+  const store = openStore(home);
+  t.after(() => store.close());
+  assert.doesNotThrow(() => classifyAllowed(store, new Date("2026-09-22T12:00:00.000Z")));
+  await assert.doesNotReject(warnBudgetIfNeeded(store, { now: () => new Date("2026-09-22T12:00:00.000Z") }));
+  assert.equal(errors.length, 6);
+  assert.ok(errors.every(line => /skipping malformed usage ledger line/.test(line)));
 });
 
 test("calls made through the gateway count toward the budget but are not exported twice", async t => {

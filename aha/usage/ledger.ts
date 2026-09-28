@@ -42,7 +42,26 @@ export function listUsage(): StoredUsage[] {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  return text.split("\n").filter(Boolean).map(line => JSON.parse(line) as StoredUsage);
+  const rows: StoredUsage[] = [];
+  for (const [index, line] of text.split("\n").entries()) {
+    if (!line.trim()) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected object");
+      const row = value as Partial<StoredUsage>;
+      if (typeof row.id !== "string" || !row.id || typeof row.at !== "string" || Number.isNaN(Date.parse(row.at))
+        || typeof row.model !== "string" || !row.model || typeof row.purpose !== "string" || !row.purpose
+        || typeof row.input !== "number" || !Number.isFinite(row.input) || row.input < 0
+        || typeof row.output !== "number" || !Number.isFinite(row.output) || row.output < 0) {
+        throw new Error("invalid usage record");
+      }
+      rows.push(row as StoredUsage);
+    } catch {
+      // Don't log the row itself: usage records belong to the user's local data.
+      console.error(`aha: skipping malformed usage ledger line ${index + 1}`);
+    }
+  }
+  return rows;
 }
 
 export function recordUsage(u: UsageCall): void {
