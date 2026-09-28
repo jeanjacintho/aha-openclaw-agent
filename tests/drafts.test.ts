@@ -258,20 +258,18 @@ function addDraftNotification(store: ReturnType<typeof openStore>, itemId: numbe
     .run(`draft:${itemId}:founder`, chatUid);
 }
 
-test("chat context names the latest pending draft notified to that chat", async t => {
+test("chat context lists up to five pending drafts notified to that chat", async t => {
   const store = await home(t);
-  const older = insertItem(store);
-  const latestForChat = insertItem(store);
+  const forChat = Array.from({ length: 6 }, () => insertItem(store));
   const newerForOtherChat = insertItem(store);
-  addDraftNotification(store, older, "chat-a");
-  addDraftNotification(store, latestForChat, "chat-a");
+  for (const itemId of forChat) addDraftNotification(store, itemId, "chat-a");
   addDraftNotification(store, newerForOtherChat, "chat-b");
 
   assert.deepEqual(lastPendingDraftContextForChat(store, "chat-a"), {
-    label: "Last pending AHA draft notified in this chat",
+    label: "Pending AHA drafts notified in this chat",
     source: "plow",
     type: "notification",
-    payload: { last_pending_item: `AHA-${latestForChat}`, state: "pending" },
+    payload: { pending_count: 6, pending_items: forChat.slice(-5).reverse().map(id => `AHA-${id}`) },
   });
 });
 
@@ -293,7 +291,9 @@ test("chat context ignores drafts that are no longer pending", async t => {
   addDraftNotification(store, ignored, "chat-a", "ignored");
   addDraftNotification(store, expired, "chat-a", "expired");
 
-  assert.equal(lastPendingDraftContextForChat(store, "chat-a")?.payload.last_pending_item, `AHA-${pending}`);
+  assert.deepEqual(lastPendingDraftContextForChat(store, "chat-a")?.payload, {
+    pending_count: 1, pending_items: [`AHA-${pending}`],
+  });
 });
 
 test("a red-line item is escalated and sent to the routed role group", async t => {

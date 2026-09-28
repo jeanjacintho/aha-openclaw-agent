@@ -39,21 +39,24 @@ type ItemContext = {
 };
 
 export function lastPendingDraftContextForChat(store: Store, chatUid: string) {
-  const row = store.db.prepare(`SELECT items.id AS itemId
-    FROM drafts
+  const matching = `FROM drafts
     JOIN items ON items.id = drafts.item_id
     JOIN deliveries ON deliveries.chat_uid = ?
       AND deliveries.status = 'sent'
       AND deliveries.key LIKE ('draft:' || items.id || ':%')
-    WHERE drafts.state = 'pending'
+    WHERE drafts.state = 'pending'`;
+  const countRow = store.db.prepare(`SELECT COUNT(DISTINCT drafts.id) AS pendingCount ${matching}`)
+    .get(chatUid) as { pendingCount: number };
+  if (!countRow.pendingCount) return undefined;
+  const rows = store.db.prepare(`SELECT DISTINCT drafts.id AS draftId, items.id AS itemId
+    ${matching}
     ORDER BY drafts.id DESC
-    LIMIT 1`).get(chatUid) as { itemId: number } | undefined;
-  if (!row) return undefined;
+    LIMIT 5`).all(chatUid) as { draftId: number; itemId: number }[];
   return {
-    label: "Last pending AHA draft notified in this chat",
+    label: "Pending AHA drafts notified in this chat",
     source: "plow",
     type: "notification",
-    payload: { last_pending_item: `AHA-${row.itemId}`, state: "pending" },
+    payload: { pending_count: countRow.pendingCount, pending_items: rows.map(row => `AHA-${row.itemId}`) },
   };
 }
 
