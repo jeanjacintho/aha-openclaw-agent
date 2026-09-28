@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { saveConfig } from "../aha/config.ts";
-import { sendToChat } from "../aha/notify/plow.ts";
+import { DELIVERY_RETRY_GRACE_MS, retryUncertainDeliveries, sendToChat } from "../aha/notify/plow.ts";
 import { openStore } from "../aha/store/db.ts";
 
 const environment = { ...process.env };
@@ -74,6 +74,59 @@ test("uncertain is not resent", async t => {
   assert.equal(await sendToChat("cht_dm", "hello", "k2", { store, fetch: fetchImpl }), "uncertain");
   assert.equal(await sendToChat("cht_dm", "hello", "k2", { store, fetch: fetchImpl }), "uncertain");
   assert.equal(posts, 1);
+});
+
+test("an uncertain delivery is blocked during grace and can be reclaimed after it", async t => {
+  const store = await home(t);
+  const now = new Date("2026-09-23T12:00:00.000Z");
+  const insert = store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at, body)
+    VALUES (?, 'cht_dm', 'uncertain', ?, ?, 'hello')`);
+  const recentAt = new Date(now.getTime() - DELIVERY_RETRY_GRACE_MS + 1).toISOString();
+  insert.run("k-recent", recentAt, recentAt);
+  const oldAt = new Date(now.getTime() - DELIVERY_RETRY_GRACE_MS - 1).toISOString();
+  insert.run("k-old", oldAt, oldAt);
+  const posts: string[] = [];
+  const fetchImpl = async (input: RequestInfo | URL) => {
+    posts.push(String(input));
+    return Response.json({ uid: "msg_retry" });
+  };
+
+  assert.equal(await sendToChat("cht_dm", "hello", "k-recent", { store, fetch: fetchImpl, now: () => now }), "uncertain");
+  assert.equal(await sendToChat("cht_dm", "hello", "k-old", { store, fetch: fetchImpl, now: () => now }), "sent");
+  assert.equal(posts.length, 1);
+});
+
+test("periodic retry resends stale uncertain deliveries with their stored body", async t => {
+  const store = await home(t);
+  const now = new Date("2026-09-23T12:00:00.000Z");
+  const at = new Date(now.getTime() - DELIVERY_RETRY_GRACE_MS - 1).toISOString();
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at, body)
+    VALUES ('k-periodic', 'cht_dm', 'uncertain', ?, ?, 'persisted text')`).run(at, at);
+  store.db.prepare(`INSERT INTO deliveries (key, chat_uid, status, created_at, updated_at, body)
+    VALUES ('k-failed-periodic', 'cht_dm', 'failed', ?, ?, 'do not retry')`).run(at, at);
+  let body = "";
+  const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)).body;
+    return Response.json({ uid: "msg_retry" });
+  };
+
+  assert.equal(await retryUncertainDeliveries(store, now, { fetch: fetchImpl }), 1);
+  assert.equal(body, "persisted text");
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = 'k-periodic'").get() as { status: string }).status, "sent");
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = 'k-failed-periodic'").get() as { status: string }).status, "failed");
+});
+
+test("a fetch timeout returns uncertain instead of hanging", async t => {
+  const store = await home(t);
+  const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return reject(new Error("signal missing"));
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    if (signal.aborted) reject(signal.reason);
+  });
+
+  assert.equal(await sendToChat("cht_dm", "hello", "k-timeout", { store, fetch: fetchImpl, timeoutMs: 5 }), "uncertain");
+  assert.equal((store.db.prepare("SELECT status FROM deliveries WHERE key = 'k-timeout'").get() as { status: string }).status, "uncertain");
 });
 
 test("HTTP 200 with a non-JSON body stays uncertain and is not posted again", async t => {

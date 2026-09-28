@@ -5,6 +5,7 @@ import { draftAndNotify, notifyExpiredDrafts } from "./responder/drafts.ts";
 import { runPromiseChecks } from "./promises/check.ts";
 import { ahaHome } from "./home.ts";
 import { runIngest } from "./pipeline/ingest.ts";
+import { retryUncertainDeliveries, type SendResult } from "./notify/plow.ts";
 import { schedule, type DailyScheduleContext, type ScheduleHandle } from "./scheduler.ts";
 import { runSiteWatch, SITE_HOUR_OFFSET_FROM_DIGEST } from "./sites/watch.ts";
 import { watchAdapters } from "./sources/watch.ts";
@@ -22,6 +23,7 @@ async function ingestThenClassify() {
     await classifyNewItems(store);
     await draftAndNotify(store);
     await runPromiseChecks(store, new Date());
+    await retryUncertainDeliveries(store);
   } finally {
     store.close();
   }
@@ -30,9 +32,16 @@ async function ingestThenClassify() {
 async function sendDigest() {
   const store = openStore();
   try {
-    await deliverDigest(store);
+    const result = await deliverDigest(store);
+    logDigestDelivery(result, new Date());
   } finally {
     store.close();
+  }
+}
+
+export function logDigestDelivery(result: SendResult, now: Date) {
+  if (result !== "sent" && result !== "duplicate") {
+    console.error(`aha: digest ${now.toISOString().slice(0, 10)} was not delivered (${result})`);
   }
 }
 
