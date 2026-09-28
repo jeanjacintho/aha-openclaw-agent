@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { type Store } from "../store/db.ts";
 
 export type DraftEventAction = "drafted" | "edited" | "approved" | "ignored" | "auto_approved"
-  | "post_refused" | "posted" | "verified" | "verify_mismatch" | "verify_unavailable" | "uncertain" | "failed";
+  | "post_refused" | "posted" | "verified" | "verify_mismatch" | "verify_unavailable" | "uncertain" | "failed"
+  | "reconciled" | "absent" | "reconcile_expired";
 export type DraftEventDetail = "item_missing" | "unsupported_source" | "not_approved" | "hash_mismatch" | "paused" | "already_posted" | "thread_taken"
-  | "cannot_post" | "auth_error" | "network_error" | "response_invalid" | "parent_mismatch" | "body_mismatch"
+  | "already_absent" | "stale_posting" | "cannot_post" | "auth_error" | "network_error" | "response_invalid" | "parent_mismatch" | "body_mismatch"
   | "author_mismatch" | "removed" | "verify_unavailable" | `http_${number}`;
 
 type DraftEvent = {
