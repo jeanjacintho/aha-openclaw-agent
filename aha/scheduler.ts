@@ -1,7 +1,7 @@
 export type ScheduledJob = {
   name: string;
   everyMs?: number;
-  dailyAt?: { hour: number; tz: string };
+  dailyAt?: { hour: number; tz: string } | (() => { hour: number; tz: string });
   run?: () => Promise<void>;
 };
 
@@ -58,8 +58,9 @@ export function schedule(jobs: ScheduledJob[], deps: ScheduleDeps = {}): Schedul
             }
           }
           if (job.dailyAt) {
-            if (dueDaily(prev, now, job.dailyAt.hour, job.dailyAt.tz, lastDaily.get(job.name))) {
-              lastDaily.set(job.name, parts(now, job.dailyAt.tz).ymd);
+            const dailyAt = typeof job.dailyAt === "function" ? job.dailyAt() : job.dailyAt;
+            if (dueDaily(prev, now, dailyAt.hour, dailyAt.tz, lastDaily.get(job.name))) {
+              lastDaily.set(job.name, parts(now, dailyAt.tz).ymd);
               await job.run?.();
             }
           }

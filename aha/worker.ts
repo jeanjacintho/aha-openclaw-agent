@@ -75,11 +75,10 @@ async function siteWatchOnce() {
 export function startAha(): { stop(): Promise<void> } | undefined {
   try {
     mkdirSync(ahaHome(), { recursive: true });
-    const daily = digestHour();
     const handle: ScheduleHandle = schedule([
       { name: "ingest", everyMs: 15 * 60 * 1000, run: ingestThenClassify },
-      { name: "digest", dailyAt: daily, run: sendDigest },
-      { name: "site-watch", dailyAt: siteHour(daily), run: siteWatchOnce },
+      { name: "digest", dailyAt: digestHour, run: sendDigest },
+      { name: "site-watch", dailyAt: () => siteHour(digestHour()), run: siteWatchOnce },
     ]);
     void handle.tick();
     console.log("aha: worker up");
