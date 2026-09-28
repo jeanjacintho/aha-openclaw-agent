@@ -19,6 +19,43 @@ test("dailyAt fires once per local day including a spring-forward skip", async (
   assert.deepEqual(fired, ["2026-03-08T07:00:00.000Z"]);
 });
 
+test("dailyAt callback is re-read each tick after configuration changes", async () => {
+  const fired: string[] = [];
+  let config: { hour: number; tz: string } | null = null;
+  let now = new Date("2026-09-23T08:58:00.000Z");
+  const handle = schedule([{
+    name: "digest",
+    dailyAt: () => config ?? { hour: 9, tz: "UTC" },
+    run: async () => { fired.push(now.toISOString()); },
+  }], { now: () => now, intervalMs: 60_000 });
+  handle.stop();
+
+  await handle.tick(now); // Null config uses the 09:00 UTC fallback.
+  config = { hour: 10, tz: "UTC" };
+  now = new Date("2026-09-23T10:00:00.000Z");
+  await handle.tick(now);
+
+  assert.deepEqual(fired, ["2026-09-23T10:00:00.000Z"]);
+});
+
+test("dailyAt callbacks share a single resolution within each tick", async () => {
+  let resolutions = 0;
+  const handle = schedule(["digest", "site-watch"].map(name => ({
+    name,
+    dailyAt: context => context.resolve("schedule", () => {
+      resolutions += 1;
+      return { hour: 9, tz: "UTC" };
+    }),
+    run: async () => {},
+  })), { now: () => new Date("2026-09-23T08:00:00.000Z"), intervalMs: 60_000 });
+  handle.stop();
+
+  await handle.tick(new Date("2026-09-23T08:00:00.000Z"));
+  assert.equal(resolutions, 1);
+  await handle.tick(new Date("2026-09-23T08:15:00.000Z"));
+  assert.equal(resolutions, 2);
+});
+
 test("dailyAt fires once when the hour repeats after a fall-back", async () => {
   const fired: string[] = [];
   let now = new Date("2026-11-01T04:30:00.000Z"); // 00:30 EDT

@@ -5,7 +5,7 @@ import { draftAndNotify, notifyExpiredDrafts } from "./responder/drafts.ts";
 import { runPromiseChecks } from "./promises/check.ts";
 import { ahaHome } from "./home.ts";
 import { runIngest } from "./pipeline/ingest.ts";
-import { schedule, type ScheduleHandle } from "./scheduler.ts";
+import { schedule, type DailyScheduleContext, type ScheduleHandle } from "./scheduler.ts";
 import { runSiteWatch, SITE_HOUR_OFFSET_FROM_DIGEST } from "./sites/watch.ts";
 import { watchAdapters } from "./sources/watch.ts";
 import { openStore } from "./store/db.ts";
@@ -53,6 +53,15 @@ function digestHour() {
   }
 }
 
+function resolveSchedule() {
+  const digest = digestHour();
+  return { digest, site: siteHour(digest) };
+}
+
+function scheduleFor<K extends "digest" | "site">(key: K) {
+  return (context: DailyScheduleContext) => context.resolve("aha-daily-schedule", resolveSchedule)[key];
+}
+
 // D4: an hour ahead of the digest, so a new mention makes that day's digest.
 export function siteHour(digest: { hour: number; tz: string }) {
   return { hour: (digest.hour - SITE_HOUR_OFFSET_FROM_DIGEST + 24) % 24, tz: digest.tz };
@@ -75,11 +84,10 @@ async function siteWatchOnce() {
 export function startAha(): { stop(): Promise<void> } | undefined {
   try {
     mkdirSync(ahaHome(), { recursive: true });
-    const daily = digestHour();
     const handle: ScheduleHandle = schedule([
       { name: "ingest", everyMs: 15 * 60 * 1000, run: ingestThenClassify },
-      { name: "digest", dailyAt: daily, run: sendDigest },
-      { name: "site-watch", dailyAt: siteHour(daily), run: siteWatchOnce },
+      { name: "digest", dailyAt: scheduleFor("digest"), run: sendDigest },
+      { name: "site-watch", dailyAt: scheduleFor("site"), run: siteWatchOnce },
     ]);
     void handle.tick();
     console.log("aha: worker up");
