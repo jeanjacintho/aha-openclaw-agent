@@ -1,7 +1,11 @@
+export type DailyScheduleContext = {
+  resolve<T>(key: string, resolver: () => T): T;
+};
+
 export type ScheduledJob = {
   name: string;
   everyMs?: number;
-  dailyAt?: { hour: number; tz: string } | (() => { hour: number; tz: string });
+  dailyAt?: { hour: number; tz: string } | ((context: DailyScheduleContext) => { hour: number; tz: string });
   run?: () => Promise<void>;
 };
 
@@ -47,6 +51,13 @@ export function schedule(jobs: ScheduledJob[], deps: ScheduleDeps = {}): Schedul
     if (running) return;
     running = true;
     const now = explicit ?? deps.now?.() ?? new Date();
+    const resolvedForTick = new Map<string, unknown>();
+    const dailyContext: DailyScheduleContext = {
+      resolve<T>(key: string, resolver: () => T): T {
+        if (!resolvedForTick.has(key)) resolvedForTick.set(key, resolver());
+        return resolvedForTick.get(key) as T;
+      },
+    };
     try {
       for (const job of jobs) {
         try {
@@ -58,7 +69,7 @@ export function schedule(jobs: ScheduledJob[], deps: ScheduleDeps = {}): Schedul
             }
           }
           if (job.dailyAt) {
-            const dailyAt = typeof job.dailyAt === "function" ? job.dailyAt() : job.dailyAt;
+            const dailyAt = typeof job.dailyAt === "function" ? job.dailyAt(dailyContext) : job.dailyAt;
             if (dueDaily(prev, now, dailyAt.hour, dailyAt.tz, lastDaily.get(job.name))) {
               lastDaily.set(job.name, parts(now, dailyAt.tz).ymd);
               await job.run?.();

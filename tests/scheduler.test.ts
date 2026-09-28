@@ -38,6 +38,24 @@ test("dailyAt callback is re-read each tick after configuration changes", async 
   assert.deepEqual(fired, ["2026-09-23T10:00:00.000Z"]);
 });
 
+test("dailyAt callbacks share a single resolution within each tick", async () => {
+  let resolutions = 0;
+  const handle = schedule(["digest", "site-watch"].map(name => ({
+    name,
+    dailyAt: context => context.resolve("schedule", () => {
+      resolutions += 1;
+      return { hour: 9, tz: "UTC" };
+    }),
+    run: async () => {},
+  })), { now: () => new Date("2026-09-23T08:00:00.000Z"), intervalMs: 60_000 });
+  handle.stop();
+
+  await handle.tick(new Date("2026-09-23T08:00:00.000Z"));
+  assert.equal(resolutions, 1);
+  await handle.tick(new Date("2026-09-23T08:15:00.000Z"));
+  assert.equal(resolutions, 2);
+});
+
 test("dailyAt fires once when the hour repeats after a fall-back", async () => {
   const fired: string[] = [];
   let now = new Date("2026-11-01T04:30:00.000Z"); // 00:30 EDT
