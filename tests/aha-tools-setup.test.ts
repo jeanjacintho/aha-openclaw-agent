@@ -322,6 +322,41 @@ test("worker and tools share the Agent Index slug", () => {
   assert.equal(adapters[4].enabled({ company: { name: "Plow" } }), false);
 });
 
+test("watch adapters respect chosen sources while retaining credential checks", () => {
+  const selected = { company: { name: "Plow" }, sources: ["reddit"], githubRepos: ["plow-pbc/plow-agents"], agentIndexSlug: "aha" };
+  const credentials = { github: "gh-token", productHunt: "ph-token", reddit: "reddit-token" };
+  const selectedIds = watchAdapters(selected, credentials).filter(adapter => adapter.enabled(selected)).map(adapter => adapter.id);
+  assert.deepEqual(selectedIds, ["reddit"]);
+
+  for (const sources of [undefined, []]) {
+    const legacy = { ...selected, sources };
+    const enabledIds = watchAdapters(legacy, credentials).filter(adapter => adapter.enabled(legacy)).map(adapter => adapter.id);
+    assert.deepEqual(enabledIds, ["hn", "agent-index", "ph", "github", "reddit"]);
+  }
+});
+
+test("watch adapters normalize aliases and fall back safely for wholly unknown saved ids", () => {
+  const credentials = { github: "gh-token", productHunt: "ph-token", reddit: "reddit-token" };
+  const config = { company: { name: "Plow" }, sources: ["Hacker News", "GitHub"], githubRepos: ["plow-pbc/plow-agents"], agentIndexSlug: "aha" };
+  assert.deepEqual(
+    watchAdapters(config, credentials).filter(adapter => adapter.enabled(config)).map(adapter => adapter.id),
+    ["hn", "github"],
+  );
+
+  const unknown = { ...config, sources: ["old-source-name"] };
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  let enabledIds: string[];
+  try {
+    enabledIds = watchAdapters(unknown, credentials).filter(adapter => adapter.enabled(unknown)).map(adapter => adapter.id);
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual(enabledIds!, ["hn", "agent-index", "ph", "github", "reddit"]);
+  assert.match(errors[0], /configured sources were unrecognized.*old-source-name/);
+});
+
 const ownerDm = { senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" };
 
 function status(dir: string) {
@@ -386,6 +421,31 @@ test("aha_setup_save args override recorded answers", async t => {
   t.after(() => store.close());
   assert.equal(getConfig(store)?.company.name, "Plow");
   assert.deepEqual(getConfig(store)?.company.aliases, ["plow.co"]);
+});
+
+test("aha_setup_save normalizes source aliases from direct arguments", async t => {
+  const dir = await home(t);
+  const result = await tools(ownerDm).get("aha_setup_save")!.execute("call", {
+    company: "Plow",
+    sources: ["Hacker News", "Reddit"],
+  });
+  assert.equal(result.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.deepEqual(getConfig(store)?.sources, ["hn", "reddit"]);
+});
+
+test("aha_setup_save rejects an unknown direct source instead of saving an inert selection", async t => {
+  const dir = await home(t);
+  const result = await tools(ownerDm).get("aha_setup_save")!.execute("call", {
+    company: "Plow",
+    sources: ["my old source"],
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /unknown source my old source/);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  assert.equal(getConfig(store), null);
 });
 
 test("aha_setup_save without a company, passed or recorded, is refused", async t => {

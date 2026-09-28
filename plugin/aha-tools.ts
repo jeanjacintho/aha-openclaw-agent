@@ -6,7 +6,7 @@ import { isRole, ROLES, routeItem, type Role } from "../aha/pipeline/route.ts";
 import { readSecrets, writeSecrets, type RedditCredentials, type Secrets } from "../aha/secrets.ts";
 import { RedditAuthError, redditAuth } from "../aha/sources/reddit-auth.ts";
 import { ahaHome } from "../aha/home.ts";
-import { watchAdapters } from "../aha/sources/watch.ts";
+import { normalizeSourceId, watchAdapters } from "../aha/sources/watch.ts";
 import { openStore, type Store } from "../aha/store/db.ts";
 import { ForgetError, forgetByUrlOrAuthor } from "../aha/store/retention.ts";
 import { checkPolicy, recordReady } from "../aha/responder/policy.ts";
@@ -106,15 +106,6 @@ async function requireOwnerDm(ctx: Requester, refusal = "secrets can only be set
   }
 }
 
-// The source ids the watch knows, and the spellings an owner might answer with.
-const SOURCE_IDS: Record<string, string> = {
-  hn: "hn", hackernews: "hn",
-  agentindex: "agent-index",
-  ph: "ph", producthunt: "ph",
-  github: "github",
-  reddit: "reddit",
-};
-
 // Which aha_secret_set source each watch source reads its credential from.
 const SOURCE_SECRET: Record<string, keyof Secrets> = { "agent-index": "github", github: "github", ph: "productHunt", reddit: "reddit" };
 const SECRET_SOURCE: Record<keyof Secrets, string> = { github: "github", productHunt: "producthunt", reddit: "reddit" };
@@ -142,6 +133,17 @@ function trimmedList(value: unknown) {
   return strings(value)?.map(item => item.trim()).filter(Boolean);
 }
 
+function setupSourceIds(value: unknown): string[] | string {
+  const sources: string[] = [];
+  for (const raw of trimmedList(value) ?? []) {
+    const id = normalizeSourceId(raw);
+    if (!id) return `unknown source ${raw}; use hn, agent-index, ph, github or reddit`;
+    if (!sources.includes(id)) sources.push(id);
+  }
+  if (!sources.length) return "pick at least one source";
+  return sources;
+}
+
 // One interview answer, checked the way the saved config will need it.
 function setupAnswers(args: Record<string, unknown>): SetupAnswers | string {
   const answers: SetupAnswers = {};
@@ -155,13 +157,8 @@ function setupAnswers(args: Record<string, unknown>): SetupAnswers | string {
     if (args[key] !== undefined) answers[key] = trimmedList(args[key]) ?? [];
   }
   if (args.sources !== undefined) {
-    const sources: string[] = [];
-    for (const raw of trimmedList(args.sources) ?? []) {
-      const id = SOURCE_IDS[raw.toLowerCase().replace(/[\s_-]+/g, "")];
-      if (!id) return `unknown source ${raw}; use hn, agent-index, ph, github or reddit`;
-      if (!sources.includes(id)) sources.push(id);
-    }
-    if (sources.length === 0) return "pick at least one source";
+    const sources = setupSourceIds(args.sources);
+    if (typeof sources === "string") return sources;
     answers.sources = sources;
   }
   if (args.githubRepos !== undefined) {
@@ -371,6 +368,11 @@ export function registerAhaTools(api: {
       let needsCredentials: string[];
       try {
         const merged = { ...getDraft(store).answers, ...args };
+        if (merged.sources !== undefined) {
+          const sources = setupSourceIds(merged.sources);
+          if (typeof sources === "string") return fail(sources);
+          merged.sources = sources;
+        }
         // After setup, a change passes only its own field; the name stays.
         company = typeof merged.company === "string" ? merged.company.trim() : getConfig(store)?.company.name ?? "";
         if (!company) return fail("company is required");
