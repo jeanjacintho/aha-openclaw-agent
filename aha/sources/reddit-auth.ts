@@ -1,4 +1,5 @@
 import { type RedditCredentials } from "../secrets.ts";
+import { withHttpTimeout } from "./http.ts";
 
 export const REDDIT_USER_AGENT = "web:aha-openclaw-agent:v0.1.0 (by /u/aha-watch)";
 export const REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token";
@@ -54,7 +55,7 @@ export function redditAuth(secret: string | RedditCredentials | undefined, deps:
         : new URLSearchParams({ grant_type: "client_credentials" });
       let response: Response;
       try {
-        response = await http(REDDIT_TOKEN_URL, {
+        response = await http(REDDIT_TOKEN_URL, withHttpTimeout({
           method: "POST",
           headers: {
             Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
@@ -62,7 +63,7 @@ export function redditAuth(secret: string | RedditCredentials | undefined, deps:
             "User-Agent": REDDIT_USER_AGENT,
           },
           body: body.toString(),
-        });
+        }));
       } catch {
         throw new RedditAuthError("reddit token request failed: network");
       }

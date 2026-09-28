@@ -1,5 +1,5 @@
 import { uniqueTermsCaseInsensitive } from "./hn.ts";
-import { retryAfterMs } from "./http.ts";
+import { retryAfterMs, withHttpTimeout } from "./http.ts";
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
 import { REDDIT_USER_AGENT, RedditAuthError, redditAuth, type RedditAuth } from "./reddit-auth.ts";
 
@@ -99,7 +99,7 @@ export function redditSource(opts: { fetch?: typeof fetch; token?: string; auth?
       try {
         let response: Response;
         try {
-          response = await withRedditToken(auth, token => http(url, { headers: oauthHeaders(token) }));
+          response = await withRedditToken(auth, token => http(url, withHttpTimeout({ headers: oauthHeaders(token) })));
         } catch (error) {
           if (error instanceof RedditAuthError) return { ok: false, error: "auth" };
           throw error;

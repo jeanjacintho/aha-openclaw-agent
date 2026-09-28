@@ -1,6 +1,11 @@
 export const PH_COMPLEXITY_BUDGET = 6250;
 export const PH_CONSERVATIVE_COST = 250;
+export const AHA_HTTP_TIMEOUT_MS = 25_000;
 const PH_WINDOW_MS = 15 * 60 * 1000;
+
+export function withHttpTimeout(init: RequestInit = {}, timeoutMs = AHA_HTTP_TIMEOUT_MS): RequestInit {
+  return { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) };
+}
 
 export function retryAfterMs(headers: Headers) {
   const raw = headers.get("retry-after");

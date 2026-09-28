@@ -17,6 +17,7 @@ test("Agent Index keeps only agent:<slug> comments and replies", async () => {
     token: "ghs_test",
     slug: "aha",
     fetch: async (_url, init) => {
+      assert.ok(init?.signal instanceof AbortSignal);
       body = String(init?.body);
       return new Response(await readFile(fixture), { status: 200 });
     },

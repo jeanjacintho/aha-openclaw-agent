@@ -1,5 +1,5 @@
 import { type AhaConfig } from "../config.ts";
-import { retryAfterMs } from "./http.ts";
+import { retryAfterMs, withHttpTimeout } from "./http.ts";
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
 
 const GQL = "https://api.github.com/graphql";
@@ -194,6 +194,7 @@ export function githubSource(opts: { fetch?: typeof fetch; token?: string; repos
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ query: gql, variables: { owner: repo.owner, name: repo.name, after: state.after } }),
+          signal: withHttpTimeout().signal,
         });
         if (response.status === 429) return { ok: false, error: "rate_limited", retryAfterMs: retryAfterMs(response.headers) };
         if (response.status === 403) {

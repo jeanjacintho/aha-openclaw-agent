@@ -26,6 +26,7 @@ test("PH fetches comments for the product and for competitors", async () => {
   const source = productHuntSource({
     token: "ph_test",
     fetch: async (_url, init) => {
+      assert.ok(init?.signal instanceof AbortSignal);
       const payload = JSON.parse(String(init?.body)) as { variables: { slug: string } };
       slugs.push(payload.variables.slug);
       const file = payload.variables.slug === "zonk" ? zonk : plow;

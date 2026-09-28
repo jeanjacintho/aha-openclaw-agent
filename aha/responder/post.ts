@@ -4,6 +4,7 @@ import { readSecrets } from "../secrets.ts";
 import { type Store } from "../store/db.ts";
 import { REDDIT_USER_AGENT, withRedditToken } from "../sources/reddit.ts";
 import { RedditAuthError, redditAuth, type RedditAuth } from "../sources/reddit-auth.ts";
+import { withHttpTimeout } from "../sources/http.ts";
 import { postLedgerKey, threadLedgerKey } from "./reddit-url.ts";
 
 export { redditSubreddit, redditThreadId, threadLedgerKey, postLedgerKey } from "./reddit-url.ts";
@@ -95,7 +96,7 @@ function commentId(payload: unknown): { id: string; permalink?: string } | undef
 }
 
 async function verify(http: typeof fetch, token: string, fullname: string) {
-  const response = await http(`${INFO}?id=${encodeURIComponent(fullname)}`, { headers: oauthHeaders(token) });
+  const response = await http(`${INFO}?id=${encodeURIComponent(fullname)}`, withHttpTimeout({ headers: oauthHeaders(token) }));
   if (!response.ok) return false;
   const payload = await response.json() as { data?: { children?: { data?: { name?: string } }[] } };
   return (payload.data?.children ?? []).some(child => child.data?.name === fullname);
@@ -150,11 +151,11 @@ export async function postReply(store: Store, draftId: number, deps: PostDeps = 
   try {
     // A 401 means Reddit refused the token, so nothing was posted and a
     // renewed token may try once more.
-    response = await withRedditToken(auth, token => http(COMMENT, {
+    response = await withRedditToken(auth, token => http(COMMENT, withHttpTimeout({
       method: "POST",
       headers: { ...oauthHeaders(token), "Content-Type": "application/x-www-form-urlencoded" },
       body,
-    }));
+    })));
   } catch (error) {
     if (error instanceof RedditAuthError) {
       finish(store, key, thread, "failed", item.url);

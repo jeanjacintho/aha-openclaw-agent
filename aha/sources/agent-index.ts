@@ -1,5 +1,5 @@
 import { type SourceAdapter, type FetchResult, type RawItem, type SourceQuery } from "./types.ts";
-import { retryAfterMs } from "./http.ts";
+import { retryAfterMs, withHttpTimeout } from "./http.ts";
 
 const GQL = "https://api.github.com/graphql";
 const OWNER = "plow-pbc";
@@ -92,6 +92,7 @@ export function agentIndexSource(opts: { fetch?: typeof fetch; token?: string; s
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ query: QUERY, variables: { after: cursor } }),
+          signal: withHttpTimeout().signal,
         });
         if (response.status === 429) return { ok: false, error: "rate_limited", retryAfterMs: retryAfterMs(response.headers) };
         if (response.status === 403) {
