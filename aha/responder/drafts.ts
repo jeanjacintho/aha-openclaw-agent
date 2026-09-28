@@ -166,7 +166,7 @@ export async function draftAndNotify(store: Store, deps: DraftDeps = {}) {
   const rows = store.db.prepare(`SELECT items.id, items.source, items.fetched_at AS fetchedAt, items.url, classifications.category, classifications.urgency, classifications.about, classifications.topic
     FROM items
     JOIN classifications ON classifications.item_id = items.id
-    WHERE items.state IN ('relevant', 'assigned')
+    WHERE items.origin != 'backfill' AND items.state IN ('relevant', 'assigned')
       AND (classifications.about IS NULL OR classifications.about NOT LIKE 'competitor:%')
       AND items.draft_attempts < ?
       AND items.id NOT IN (SELECT item_id FROM drafts WHERE state IN ('pending', 'approved', 'ignored'))

@@ -17,10 +17,10 @@ async function home(t: import("node:test").TestContext) {
   return store;
 }
 
-function insertItem(store: ReturnType<typeof openStore>, over: { id?: number; state?: string; body?: string; fetched?: string; url?: string }) {
-  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state)
-    VALUES ('hn', ?, ?, 'a', 't', ?, '2026-09-22T10:00:00.000Z', ?, ?)`).run(
-    String(over.id ?? Math.random()), over.url ?? "https://news.ycombinator.com/item?id=1", over.body ?? "plow mention", over.fetched ?? "2026-09-22T12:00:00.000Z", over.state ?? "relevant",
+function insertItem(store: ReturnType<typeof openStore>, over: { id?: number; state?: string; body?: string; fetched?: string; url?: string; origin?: "live" | "backfill" }) {
+  store.db.prepare(`INSERT INTO items (source, external_id, url, author, title, body, published_at, fetched_at, state, origin)
+    VALUES ('hn', ?, ?, 'a', 't', ?, '2026-09-22T10:00:00.000Z', ?, ?, ?)`).run(
+    String(over.id ?? Math.random()), over.url ?? "https://news.ycombinator.com/item?id=1", over.body ?? "plow mention", over.fetched ?? "2026-09-22T12:00:00.000Z", over.state ?? "relevant", over.origin ?? "live",
   );
   return Number((store.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id);
 }
@@ -71,6 +71,18 @@ test("the 24h window includes yesterday UTC when the local digest hour is still 
   assert.equal(model.readCount, 1);
   assert.equal(model.items.length, 1);
   assert.equal(model.items[0].topic, "preço");
+});
+
+test("backfill items stay in digest sections but do not inflate the read count", async t => {
+  const store = await home(t);
+  const live = insertItem(store, { id: 1 });
+  const backfill = insertItem(store, { id: 2, origin: "backfill" });
+  classify(store, live, { category: "security", urgency: "high" });
+  classify(store, backfill, { category: "security", urgency: "high", topic: "backfill topic" });
+
+  const model = buildDigest(store, "founder", until);
+  assert.equal(model.readCount, 1);
+  assert.deepEqual(model.items.map(item => item.id).sort(), [live, backfill].sort());
 });
 
 test("excerpt strips markdown links, URLs and www hosts", () => {

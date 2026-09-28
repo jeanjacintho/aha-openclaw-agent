@@ -178,6 +178,31 @@ test("the worker drafts an eligible item and sends AHA-n to the role group", asy
   assert.equal(posts.some(row => row.url.includes("/chats/cht_marketing/messages") && row.body.includes(`AHA-${itemId}`)), true);
 });
 
+test("the worker skips automatic drafts and notifications for backfill items", async t => {
+  const store = await home(t);
+  plowEnv(t);
+  saveConfig(store, { company: { name: "Plow" }, language: "en", ownerChatUid: "cht_dm" });
+  const itemId = insertItem(store, { category: "security" });
+  store.db.prepare("UPDATE items SET origin = 'backfill' WHERE id = ?").run(itemId);
+  let completed = 0;
+  const posts: string[] = [];
+  await draftAndNotify(store, {
+    now,
+    complete: async () => {
+      completed += 1;
+      return { ok: true, value: { body: "Thanks for asking about Plow queues." } };
+    },
+    fetch: async input => {
+      posts.push(String(input));
+      return Response.json({ uid: "msg" });
+    },
+  });
+  assert.equal(completed, 0);
+  assert.deepEqual(posts, []);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM drafts WHERE item_id = ?").get(itemId) as { n: number }).n, 0);
+  assert.equal((store.db.prepare("SELECT state FROM items WHERE id = ?").get(itemId) as { state: string }).state, "relevant");
+});
+
 test("an ignored item is not drafted again", async t => {
   const store = await home(t);
   plowEnv(t);

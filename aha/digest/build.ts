@@ -69,7 +69,7 @@ export function buildDigest(s: Store, role: Role, until: Date, tz = "UTC"): Dige
   const untilIso = until.toISOString();
   const dayStart = new Date(until.getTime() - DAY_MS).toISOString();
   const staleStart = new Date(until.getTime() - 2 * DAY_MS).toISOString();
-  const readCount = (s.db.prepare("SELECT COUNT(*) AS n FROM items WHERE fetched_at > ? AND fetched_at <= ?").get(dayStart, untilIso) as { n: number }).n;
+  const readCount = (s.db.prepare("SELECT COUNT(*) AS n FROM items WHERE origin != 'backfill' AND fetched_at > ? AND fetched_at <= ?").get(dayStart, untilIso) as { n: number }).n;
   const rows = s.db.prepare(`SELECT items.id, items.body, items.url, items.state, items.fetched_at,
       classifications.category, classifications.urgency, classifications.topic
     FROM items
