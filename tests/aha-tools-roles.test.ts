@@ -35,7 +35,7 @@ function env(t: import("node:test").TestContext, values: Record<string, string |
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function home(t: import("node:test").TestContext, capture: { chats?: { members: string[]; body?: string }[]; messages?: { url: string; body: string }[]; listing?: object[] } = {}) {
+async function home(t: import("node:test").TestContext, capture: { chats?: { members: string[]; body?: string }[]; messages?: { url: string; body: string }[]; listing?: object[]; duringCreate?: () => Promise<void> } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "aha-roles-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   env(t, { AHA_HOME: dir, PLOW_API_BASE: "http://plow.test", PLOW_AGENT_TOKEN: "tok" });
@@ -46,6 +46,9 @@ async function home(t: import("node:test").TestContext, capture: { chats?: { mem
     if (url.endsWith("/v1/chats") && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { body?: string; members?: string[] };
       capture.chats?.push({ members: body.members ?? [], body: body.body });
+      const duringCreate = capture.duringCreate;
+      capture.duringCreate = undefined;
+      await duringCreate?.();
       const role = ["founder", "produto", "marketing", "engenharia"].find(name => body.body?.includes(name));
       return Response.json({ uid: `cht_${role ?? "group"}` });
     }
@@ -107,6 +110,25 @@ test("the owner creates role groups via POST /chats and stores chat uids", async
   const store = openStore(dir);
   t.after(() => store.close());
   assert.deepEqual(getConfig(store)?.roleChats, chats);
+});
+
+test("role group creation preserves setup changes made while waiting for Plow", async t => {
+  const capture: { duringCreate?: () => Promise<void> } = {};
+  const dir = await home(t, capture);
+  const map = tools({ senderIsOwner: true, requesterSenderId: "plow-owner", nativeChannelId: "cht_dm" });
+  capture.duringCreate = async () => {
+    const saved = await map.get("aha_setup_save")!.execute("setup", { digestHour: 21 });
+    assert.equal(saved.isError ?? false, false);
+  };
+
+  const result = await map.get("aha_role_groups_create")!.execute("create", {});
+  assert.equal(result.isError ?? false, false);
+  const store = openStore(dir);
+  t.after(() => store.close());
+  const cfg = getConfig(store);
+  assert.equal(cfg?.digestHour, 21);
+  assert.equal(cfg?.roleChats?.founder, "cht_founder");
+  assert.equal(cfg?.roleChats?.marketing, "cht_marketing");
 });
 
 test("aha_ask in a marketing group does not return a security item", async t => {

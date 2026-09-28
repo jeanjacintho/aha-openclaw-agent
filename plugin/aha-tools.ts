@@ -773,8 +773,13 @@ export function registerAhaTools(api: {
           });
           roleChats[role] = chat.uid;
         }
-        saveConfig(store, { ...cfg, roleChats });
-        return ok(notAdded.length ? { roleChats, notAdded } : { roleChats });
+        // Network calls above may take long enough for setup to update the config.
+        // Merge the groups into the latest config so those newer fields survive.
+        const latestCfg = getConfig(store);
+        if (!latestCfg) return fail("setup is required");
+        const latestRoleChats = { ...roleChats, ...latestCfg.roleChats };
+        saveConfig(store, { ...latestCfg, roleChats: latestRoleChats });
+        return ok(notAdded.length ? { roleChats: latestRoleChats, notAdded } : { roleChats: latestRoleChats });
       } catch (error) {
         return fail(error instanceof Error ? error.message : "could not create role groups");
       } finally {
