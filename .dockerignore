@@ -1,6 +1,11 @@
 .git
+.claude
+**/.claude
 plow-credentials
+**/plow-credentials
 node_modules
+**/node_modules
 dist
+**/dist
 docs
 checks
